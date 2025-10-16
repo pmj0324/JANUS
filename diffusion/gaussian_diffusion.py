@@ -135,8 +135,17 @@ class GaussianDiffusion(nn.Module):
         if noise is None:
             noise = torch.randn_like(x0_sig)
         
-        sqrt_alpha_bar = self.sqrt_alphas_cumprod[t][:, None, None]
-        sqrt_one_minus_alpha_bar = self.sqrt_one_minus_alphas_cumprod[t][:, None, None]
+        # Ensure all tensors are on the same device as x0_sig
+        device = x0_sig.device
+        t = t.to(device=device)
+        noise = noise.to(device=device)
+        
+        # Move buffers to the same device as input tensors
+        sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device=device)
+        sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device=device)
+        
+        sqrt_alpha_bar = sqrt_alphas_cumprod[t][:, None, None]
+        sqrt_one_minus_alpha_bar = sqrt_one_minus_alphas_cumprod[t][:, None, None]
         
         return sqrt_alpha_bar * x0_sig + sqrt_one_minus_alpha_bar * noise
     
@@ -151,9 +160,18 @@ class GaussianDiffusion(nn.Module):
         
         x_0 = (x_t - sqrt(1-α̅_t) * ε) / sqrt(α̅_t)
         """
+        # Ensure all tensors are on the same device as x_t
+        device = x_t.device
+        t = t.to(device=device)
+        noise = noise.to(device=device)
+        
+        # Move buffers to the same device as input tensors
+        sqrt_recip_alphas_cumprod = self.sqrt_recip_alphas_cumprod.to(device=device)
+        sqrt_recipm1_alphas_cumprod = self.sqrt_recipm1_alphas_cumprod.to(device=device)
+        
         return (
-            self.sqrt_recip_alphas_cumprod[t][:, None, None] * x_t -
-            self.sqrt_recipm1_alphas_cumprod[t][:, None, None] * noise
+            sqrt_recip_alphas_cumprod[t][:, None, None] * x_t -
+            sqrt_recipm1_alphas_cumprod[t][:, None, None] * noise
         )
     
     def loss(

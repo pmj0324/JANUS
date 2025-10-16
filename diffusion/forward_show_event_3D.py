@@ -266,6 +266,9 @@ def visualize_forward_process(
         charge = x_t[0, 0].cpu().numpy()  # (5160,)
         time_vals = x_t[0, 1].cpu().numpy()  # (5160,)
         
+        # Convert x_t to numpy for normalized visualization
+        x_t_np = x_t[0].cpu().numpy()  # (2, 5160) - normalized signal
+        
         charge_range = f"[{charge.min():.3f}, {charge.max():.3f}]"
         time_range = f"[{time_vals.min():.3f}, {time_vals.max():.3f}]"
         
