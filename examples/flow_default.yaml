@@ -1,0 +1,92 @@
+# Flow Matching Model Configuration
+# ==================================
+
+experiment_name: "icecube_flow_default"
+description: "Default Flow Matching model for IceCube PMT signals"
+
+# Model configuration
+model:
+  architecture: "dit"
+  seq_len: 5160
+  hidden: 512
+  depth: 8
+  heads: 8
+  dropout: 0.1
+  fusion: "FiLM"  # FiLM often works better for Flow Matching
+  label_dim: 6
+  t_embed_dim: 128
+  mlp_ratio: 4.0
+  
+  # Normalization metadata
+  affine_offsets: [0.0, 0.0, -600.0, -550.0, -550.0]
+  affine_scales: [200.0, 10.0, 1200.0, 1100.0, 1100.0]
+  label_offsets: [0.0, 0.0, 0.0, -600.0, -550.0, -550.0]
+  label_scales: [100000000.0, 3.14159, 6.28318, 1200.0, 1100.0, 1100.0]
+  time_transform: "ln"
+
+# Flow Matching configuration
+flow:
+  sigma_min: 0.0001  # Minimum noise level
+  use_ode_solver: "euler"  # "euler" or "midpoint"
+  num_steps: 50  # Much fewer steps than diffusion!
+  use_cfm: true  # Conditional Flow Matching
+  
+  # Classifier-free guidance
+  use_cfg: true
+  cfg_scale: 2.0
+  cfg_dropout: 0.1
+
+# Data configuration
+data:
+  h5_path: "${GENESIS_ROOT}GENESIS-data/22644_0921_time_shift.h5"
+  replace_time_inf_with: 0.0
+  channel_first: true
+  batch_size: 256
+  num_workers: 16
+  pin_memory: true
+  shuffle: true
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  
+  # Normalization
+  time_transform: "ln"
+  affine_offsets: [0.0, 0.0, -600.0, -550.0, -550.0]
+  affine_scales: [200.0, 10.0, 1200.0, 1100.0, 1100.0]
+  label_offsets: [0.0, 0.0, 0.0, -600.0, -550.0, -550.0]
+  label_scales: [100000000.0, 3.14159, 6.28318, 1200.0, 1100.0, 1100.0]
+
+# Training configuration
+training:
+  num_epochs: 100
+  learning_rate: 0.0002  # Flow Matching often benefits from slightly higher LR
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  optimizer: "AdamW"
+  scheduler: "plateau"
+  warmup_ratio: 0.04
+  
+  # Plateau scheduler
+  plateau_patience: 5
+  plateau_factor: 0.5
+  plateau_mode: "min"
+  
+  # Early stopping
+  early_stopping: true
+  early_stopping_patience: 10
+  early_stopping_min_delta: 1e-4
+  early_stopping_mode: "min"
+  early_stopping_restore_best: true
+  
+  log_interval: 50
+  eval_interval: 1
+  output_dir: "outputs/flow"
+  checkpoint_dir: "checkpoints/flow"
+  log_dir: "logs/flow"
+  use_amp: true
+
+# System settings
+device: "auto"
+seed: 42
+use_wandb: false
+

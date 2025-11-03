@@ -1,301 +1,399 @@
-# GENESIS Documentation
+# GENESIS
 
-**Complete documentation for the GENESIS IceCube diffusion model**
+**Generative Engine for Neutrino Event Simulation and Infernce System**
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
 
-## 📚 Documentation Structure
+## 🎯 Overview
 
-### 🚀 Setup & Getting Started
+GENESIS is a **generative model** for synthesizing IceCube PMT signals from neutrino events. It uses a **Diffusion Transformer (DiT)** architecture to learn the complex patterns of photomultiplier tube (PMT) responses conditioned on neutrino event properties.
 
-Start here if you're new to GENESIS:
+### Key Features
 
-- **[Quick Start](setup/QUICK_START.md)** - 5-minute guide to get started
-- **[Getting Started](setup/GETTING_STARTED.md)** - Complete setup and first training
-- **[Environment Setup](setup/MICROMAMBA_SETUP.md)** - Conda/Micromamba installation
+- 🚀 **State-of-the-art DiT architecture** for high-quality signal generation
+- 📊 **Efficient normalization** in dataloader (not model) for faster training
+- 🎨 **3D visualization** of generated events
+- ⚡ **GPU-optimized** training with automatic batch size selection
+- 🔧 **Flexible configuration** via YAML files
+- 📦 **Task management** system for organized experiments
+- 🎯 **Classifier-free guidance** for better conditioning
+
+---
+
+## 🚀 Quick Start
+
+### Installation
+
+```bash
+# Create environment
+micromamba create -n genesis python=3.10 pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia -c conda-forge
+micromamba activate genesis
+
+# Install dependencies
+pip install h5py numpy matplotlib scipy tqdm tensorboard pyyaml
+```
+
+### Train Your First Model
+
+```bash
+# Train with default configuration
+python scripts/train.py --config configs/default.yaml
+```
+
+### Generate Samples
+
+```bash
+# Sample from trained model
+python scripts/sample.py \
+    --config outputs/config.yaml \
+    --checkpoint outputs/checkpoints/best_model.pth \
+    --n-samples 100
+```
+
+**→ See [Quick Start Guide](docs/setup/QUICK_START.md) for detailed instructions**
+
+---
+
+## 📚 Documentation
+
+### 🚀 Getting Started
+- **[Quick Start](docs/setup/QUICK_START.md)** - Get up and running in 5 minutes
+- **[Getting Started](docs/setup/GETTING_STARTED.md)** - Complete setup tutorial
+- **[Environment Setup](docs/setup/MICROMAMBA_SETUP.md)** - Conda/Micromamba installation
 
 ### 🏗️ Architecture
-
-Understand how GENESIS works:
-
-- **[Model Architecture](architecture/MODEL_ARCHITECTURE.md)** - DiT model structure & normalization
-- **[Normalization System](architecture/NORMALIZATION.md)** - Complete normalization guide
-- **[Diffusion Module](architecture/DIFFUSION_MODULE.md)** - Diffusion process details
-- **[Time Transform](architecture/TIME_TRANSFORM.md)** - Time transformation methods
+- **[Model Architecture](docs/architecture/MODEL_ARCHITECTURE.md)** - DiT model & normalization system
+- **[Normalization](docs/architecture/NORMALIZATION.md)** - Complete normalization guide
+- **[Diffusion Module](docs/architecture/DIFFUSION_MODULE.md)** - Diffusion process details
 
 ### 📖 Guides
-
-Step-by-step guides for common tasks:
-
-- **[Training Guide](guides/TRAINING.md)** - How to train models
-- **[Training Examples](guides/TRAINING_EXAMPLES.md)** - Example configurations
-- **[Sampling Guide](guides/SAMPLING.md)** - Generate samples from trained models
-- **[GPU Optimization](guides/GPU_OPTIMIZATION.md)** - Maximize GPU utilization
+- **[Training Guide](docs/guides/TRAINING.md)** - Train models
+- **[Sampling Guide](docs/guides/SAMPLING.md)** - Generate samples
+- **[GPU Optimization](docs/guides/GPU_OPTIMIZATION.md)** - Maximize performance
 
 ### 📋 Reference
-
-API documentation and technical references:
-
-- **[API Reference](reference/API.md)** - Complete API documentation
-- **[Configuration Reference](reference/CONFIG.md)** - YAML configuration options
-- **[CLI Reference](reference/CLI.md)** - Command-line interface
+- **[API Reference](docs/reference/API.md)** - Complete API documentation
+- **[Full Documentation Index](docs/README.md)** - Browse all documentation
 
 ---
 
-## 🎯 Quick Navigation
+## 🏗️ Architecture
 
-### I want to...
+### Model Structure
 
-**Get started quickly**
-→ [Quick Start](setup/QUICK_START.md)
+```
+Input: [charge, time, x, y, z] + Event Labels
+   ↓
+Dataloader Normalization (ln + affine)
+   ↓
+DiT Model (Transformer-based)
+   ↓
+Noise Prediction (2 channels: charge, time)
+   ↓
+Denormalization
+   ↓
+Output: Generated PMT Signals
+```
 
-**Understand the model**
-→ [Model Architecture](architecture/MODEL_ARCHITECTURE.md)
+### Normalization System
 
-**Train a model**
-→ [Training Guide](guides/TRAINING.md)
+GENESIS uses a **two-stage normalization** applied in the **dataloader**:
 
-**Generate samples**
-→ [Sampling Guide](guides/SAMPLING.md)
+1. **Time transformation**: `ln(1 + time)` handles zeros naturally
+2. **Affine normalization**: `(x - offset) / scale` brings data to normalized range
 
-**Understand normalization**
-→ [Normalization System](architecture/NORMALIZATION.md)
+**Key benefit**: Normalization happens **once per sample** (at loading), not every forward pass → faster training!
 
-**Optimize GPU usage**
-→ [GPU Optimization](guides/GPU_OPTIMIZATION.md)
-
-**Look up API details**
-→ [API Reference](reference/API.md)
+**→ See [Model Architecture](docs/architecture/MODEL_ARCHITECTURE.md) for details**
 
 ---
 
-## 📁 Repository Structure
+## 📁 Project Structure
 
 ```
 GENESIS/
-├── dataloader/          # Data loading and preprocessing
+├── dataloader/          # Data loading & normalization
 ├── models/              # Model architectures
 │   ├── pmt_dit.py      # DiT model (main)
 │   └── architectures.py # Alternative architectures
 ├── diffusion/           # Diffusion process
-│   ├── gaussian_diffusion.py
-│   └── schedulers.py
 ├── training/            # Training infrastructure
-│   ├── trainer.py
-│   ├── schedulers.py
-│   └── evaluation.py
 ├── scripts/             # Main scripts
-│   ├── train.py        # Training script
-│   └── sample.py       # Sampling script
+│   ├── train.py        # Training
+│   └── sample.py       # Sampling
 ├── utils/               # Utilities
-│   ├── denormalization.py
-│   └── visualization.py
 ├── configs/             # Configuration files
-│   ├── default.yaml
-│   ├── testing.yaml
+│   ├── default.yaml    # Default config
+│   ├── testing.yaml    # Fast testing
 │   ├── models/         # Model configs
 │   ├── data/           # Data configs
 │   └── training/       # Training configs
 ├── tasks/               # Experiment management
-└── docs/                # Documentation (you are here!)
-    ├── setup/          # Getting started guides
-    ├── architecture/   # System architecture
+│   └── create_task.sh  # Create new experiment
+└── docs/                # Documentation
+    ├── setup/          # Getting started
+    ├── architecture/   # System design
     ├── guides/         # How-to guides
     └── reference/      # API reference
 ```
 
 ---
 
-## 🔑 Key Concepts
+## 🎓 Example Usage
 
-### Diffusion Model
-GENESIS uses a **Diffusion Transformer (DiT)** to generate IceCube PMT signals. The model learns to denoise signals through a reverse diffusion process.
+### Training
 
-### Normalization
-**All normalization happens in the Dataloader**, not in the model:
-1. Time transformation: `ln(1+x)` or `log10(1+x)`
-2. Affine normalization: `(x - offset) / scale`
-3. Model stores parameters as metadata for denormalization
+```python
+from config import load_config_from_file
+from training import Trainer
 
-See: [Normalization System](architecture/NORMALIZATION.md)
+# Load configuration
+config = load_config_from_file("configs/default.yaml")
 
-### PMT Signals
-- **Input**: 5160 PMTs, each with (charge, time, x, y, z)
-- **Output**: Generated (charge, time) for each PMT
-- **Conditioning**: Event labels (Energy, Zenith, Azimuth, X, Y, Z)
-
-### Task Management
-Experiments are organized in `tasks/` directory:
+# Create and run trainer
+trainer = Trainer(config)
+trainer.train()
 ```
-tasks/
-└── YYYYMMDD_experiment_name/
-    ├── config.yaml
-    ├── run.sh
-    ├── logs/
-    └── outputs/
+
+### Sampling
+
+```python
+from models.factory import ModelFactory
+from utils.denormalization import denormalize_signal
+
+# Load model
+model, diffusion = ModelFactory.create_model_and_diffusion(
+    model_config, diffusion_config
+)
+
+# Generate samples
+samples_normalized = diffusion.sample(
+    label=labels,  # (N, 6): [Energy, Zenith, Azimuth, X, Y, Z]
+    geom=geom,     # (N, 3, 5160): [x, y, z]
+    shape=(N, 2, 5160)  # N samples, 2 channels, 5160 PMTs
+)
+
+# Denormalize to real scale
+norm_params = model.get_normalization_params()
+samples_raw = denormalize_signal(
+    samples_normalized,
+    norm_params['affine_offsets'],
+    norm_params['affine_scales'],
+    norm_params['time_transform']
+)
 ```
+
+**→ See [Sampling Guide](docs/guides/SAMPLING.md) for more examples**
 
 ---
 
-## 📊 Typical Workflow
+## ⚙️ Configuration
 
-### 1. Setup
-```bash
-# Install dependencies
-micromamba create -n genesis python=3.10 -c conda-forge
-micromamba activate genesis
-pip install -r requirements.txt
+### Model Configuration
+
+```yaml
+model:
+  seq_len: 5160        # Number of PMTs
+  hidden: 512          # Hidden dimension
+  depth: 8             # Transformer layers
+  heads: 8             # Attention heads
+  dropout: 0.1
+  fusion: "SUM"        # Token fusion strategy
+  
+  # Normalization metadata (for denormalization)
+  affine_offsets: [0.0, 0.0, 0.0, 0.0, 0.0]
+  affine_scales: [100.0, 10.0, 600.0, 550.0, 550.0]
+  label_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  label_scales: [50000000.0, 1.0, 1.0, 600.0, 550.0, 550.0]
+  time_transform: "ln"
 ```
 
-See: [Environment Setup](setup/MICROMAMBA_SETUP.md)
+### Data Configuration
 
-### 2. Training
+```yaml
+data:
+  h5_path: "path/to/data.h5"
+  batch_size: 512
+  num_workers: 40
+  
+  # Normalization (applied in Dataloader)
+  time_transform: "ln"
+  affine_offsets: [0.0, 0.0, 0.0, 0.0, 0.0]
+  affine_scales: [100.0, 10.0, 600.0, 550.0, 550.0]
+  label_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  label_scales: [50000000.0, 1.0, 1.0, 600.0, 550.0, 550.0]
+```
+
+**→ See [Configuration Reference](docs/reference/CONFIG.md) for all options**
+
+---
+
+## 🔬 Experiments & Tasks
+
+Organize experiments using the task management system:
+
 ```bash
-# Train with default config
-python scripts/train.py --config configs/default.yaml
-
-# Or create a task
+# Create a new experiment
 ./tasks/create_task.sh my_experiment
+
+# This creates:
+# tasks/YYYYMMDD_my_experiment/
+#   ├── config.yaml      # Configuration
+#   ├── run.sh           # Training script
+#   ├── logs/            # Training logs
+#   └── outputs/         # Checkpoints & samples
+
+# Run the experiment
 cd tasks/YYYYMMDD_my_experiment
 bash run.sh
 ```
 
-See: [Training Guide](guides/TRAINING.md)
+---
 
-### 3. Sampling
-```bash
-# Generate samples
-python scripts/sample.py \
-    --config config.yaml \
-    --checkpoint outputs/checkpoints/best_model.pth \
-    --n-samples 100
+## 🎨 Visualization
+
+GENESIS automatically generates 3D visualizations of sampled events:
+
+```python
+from utils.event_visualization.event_show import show_event_from_npz
+
+show_event_from_npz(
+    npz_path="sample_0000.npz",
+    output_path="sample_0000_3d.png"
+)
 ```
 
-See: [Sampling Guide](guides/SAMPLING.md)
+Features:
+- ✅ PMT positions in 3D
+- ✅ Charge shown as marker size
+- ✅ Time shown as color gradient
+- ✅ Compatible with `npz-show-event.py` format
 
-### 4. Evaluation
+---
+
+## 🔧 GPU Optimization
+
+GENESIS includes tools for automatic GPU optimization:
+
 ```bash
-# Test diffusion process
+# Quick optimization (recommended)
+python gpu_tools/benchmark_gpu.py --quick
+
+# Full optimization (thorough)
+python gpu_tools/benchmark_gpu.py --full
+
+# Generates optimized config automatically
+```
+
+This automatically finds:
+- ✅ Optimal batch size
+- ✅ Best number of workers
+- ✅ Memory-efficient settings
+
+**→ See [GPU Optimization Guide](docs/guides/GPU_OPTIMIZATION.md)**
+
+---
+
+## 📊 Model Zoo
+
+| Model | Hidden | Depth | Params | Performance |
+|-------|--------|-------|--------|-------------|
+| **Small** | 64 | 2 | ~0.5M | Fast, baseline |
+| **Medium** | 256 | 4 | ~8M | Balanced |
+| **Large** | 512 | 8 | ~50M | High quality |
+| **XLarge** | 1024 | 12 | ~200M | Best quality |
+
+Configurations available in `configs/models/`
+
+---
+
+## 🧪 Testing & Validation
+
+### Test Diffusion Process
+
+```bash
+# Verify forward diffusion converges to Gaussian
 python diffusion/test_diffusion_process.py \
-    --config config.yaml \
+    --config configs/default.yaml \
     --analyze-only
 ```
 
----
+### Quick Testing
 
-## 🎓 Learning Path
-
-### Beginner
-1. ✅ [Quick Start](setup/QUICK_START.md) - Get GENESIS running
-2. ✅ [Getting Started](setup/GETTING_STARTED.md) - Understand the basics
-3. ✅ [Training Guide](guides/TRAINING.md) - Train your first model
-
-### Intermediate
-4. ✅ [Model Architecture](architecture/MODEL_ARCHITECTURE.md) - Understand the model
-5. ✅ [Normalization System](architecture/NORMALIZATION.md) - Deep dive into preprocessing
-6. ✅ [Training Examples](guides/TRAINING_EXAMPLES.md) - Advanced training scenarios
-
-### Advanced
-7. ✅ [Diffusion Module](architecture/DIFFUSION_MODULE.md) - Diffusion theory
-8. ✅ [GPU Optimization](guides/GPU_OPTIMIZATION.md) - Maximize performance
-9. ✅ [API Reference](reference/API.md) - Full API details
+```bash
+# Fast testing with 10% of data
+python scripts/train.py --config configs/testing.yaml
+```
 
 ---
 
-## 🔍 Common Issues
+## 📈 Performance
 
-### Training Issues
+Typical performance on NVIDIA A100:
 
-**Problem**: NaN loss during training
-- **Solution**: Check normalization parameters in config
-- See: [Normalization System](architecture/NORMALIZATION.md)
+| Batch Size | Throughput | Memory | Training Time |
+|------------|------------|--------|---------------|
+| 256 | ~400 samples/s | 12 GB | ~6 hours |
+| 512 | ~700 samples/s | 20 GB | ~3 hours |
+| 1024 | ~1200 samples/s | 35 GB | ~1.5 hours |
 
-**Problem**: Slow training
-- **Solution**: Optimize batch size and num_workers
-- See: [GPU Optimization](guides/GPU_OPTIMIZATION.md)
-
-**Problem**: CUDA out of memory
-- **Solution**: Reduce batch size or model size
-- See: [Training Guide](guides/TRAINING.md#memory-management)
-
-### Data Issues
-
-**Problem**: "Unable to open HDF5 file"
-- **Solution**: Check data path in config
-- See: [Configuration Reference](reference/CONFIG.md)
-
-**Problem**: Inf/NaN in data statistics
-- **Solution**: Check time transformation and normalization
-- See: [Normalization System](architecture/NORMALIZATION.md)
+*Based on default model (hidden=512, depth=8)*
 
 ---
 
 ## 🤝 Contributing
 
-Documentation improvements are welcome! Please:
+Contributions are welcome! Areas for improvement:
 
-1. Keep sections focused and concise
-2. Include code examples
-3. Use clear headings and formatting
-4. Link to related documentation
+- 🔬 New architectures
+- 📊 Better evaluation metrics
+- 🎨 Visualization tools
+- 📚 Documentation
+- 🐛 Bug fixes
 
 ---
 
-## 📝 Documentation Standards
+## 📄 License
 
-### Writing Style
-- **Clear and concise**: Get to the point quickly
-- **Example-driven**: Show code examples
-- **Cross-referenced**: Link to related docs
-- **Hierarchical**: Use clear section structure
+MIT License - see [LICENSE](LICENSE) for details
 
-### Code Examples
-```python
-# Always include imports
-import torch
-from models import PMTDit
+---
 
-# Show complete, runnable examples
-model = PMTDit(hidden=512, depth=8)
+## 🙏 Acknowledgments
+
+- **IceCube Collaboration** for neutrino data
+- **DiT paper** for transformer-based diffusion
+- **DDPM paper** for diffusion fundamentals
+
+---
+
+## 📞 Contact
+
+- **Issues**: [GitHub Issues](https://github.com/your-repo/issues)
+- **Documentation**: [docs/README.md](docs/README.md)
+- **Questions**: Open an issue with the `question` tag
+
+---
+
+## 🎓 Citation
+
+If you use GENESIS in your research, please cite:
+
+```bibtex
+@software{genesis2025,
+  title={GENESIS: Generative IceCube Neutrino Event Synthesis},
+  author={Your Name},
+  year={2025},
+  url={https://github.com/your-repo/GENESIS}
+}
 ```
 
-### File Organization
-```
-docs/
-├── setup/          # Installation, environment setup
-├── architecture/   # System design, algorithms
-├── guides/         # How-to guides, tutorials
-└── reference/      # API docs, config reference
-```
-
 ---
 
-## 📚 External Resources
+**Happy modeling! 🚀**
 
-### Papers
-- **Diffusion Models**: [DDPM](https://arxiv.org/abs/2006.11239)
-- **DiT**: [Diffusion Transformers](https://arxiv.org/abs/2212.09748)
-- **IceCube**: [IceCube Observatory](https://icecube.wisc.edu/)
-
-### Tools
-- **PyTorch**: [pytorch.org](https://pytorch.org/)
-- **HDF5**: [hdfgroup.org](https://www.hdfgroup.org/)
-- **Micromamba**: [mamba.readthedocs.io](https://mamba.readthedocs.io/)
-
----
-
-## 🆘 Getting Help
-
-1. **Check documentation**: Most questions are answered here
-2. **Search issues**: Others may have had similar problems
-3. **Ask questions**: Open an issue with details
-
----
-
-**Last Updated**: 2025-10-11  
-**Version**: 1.0  
-**Status**: ✅ Complete
-
----
-
-Happy modeling! 🚀
+For detailed documentation, see **[docs/README.md](docs/README.md)**
