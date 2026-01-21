@@ -94,7 +94,7 @@ training:
   detect_anomaly: false
 
 # System settings
-device: "auto"
+device: "cuda"
 seed: 42
 
 # Logging

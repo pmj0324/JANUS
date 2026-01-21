@@ -129,7 +129,7 @@ def compute_alpha_schedule(betas: torch.Tensor) -> Dict[str, torch.Tensor]:
     """
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
-    alphas_cumprod_prev = torch.cat([torch.ones(1), alphas_cumprod[:-1]])
+    alphas_cumprod_prev = torch.cat([torch.ones(1, device=betas.device, dtype=betas.dtype), alphas_cumprod[:-1]])
     
     return {
         "betas": betas,

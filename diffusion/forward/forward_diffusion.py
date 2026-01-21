@@ -101,6 +101,9 @@ def apply_forward_diffusion(
     Returns:
         Noised samples x_t (B, C, L)
     """
+    # Ensure betas are on the same device as x0
+    betas = betas.to(x0.device)
+    
     # Compute alpha schedule from betas
     alpha_schedule = compute_alpha_schedule(betas)
     
