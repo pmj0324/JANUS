@@ -1,13 +1,16 @@
-#!/usr/bin/env python3
 """
-Noise Schedules for Diffusion (Legacy Compatibility)
-=====================================================
+Noise Schedules for Diffusion Models
+=====================================
 
-This file is kept for backward compatibility.
-New code should use: from diffusion.schedules import ...
+Different noise schedules for diffusion models:
+- Linear: Linear beta schedule from DDPM paper
+- Cosine: Cosine schedule for smoother noise addition
+- Quadratic: Quadratic beta schedule
+- Sigmoid: Sigmoid beta schedule
+
+Each schedule defines β_t which controls how noise is added at each timestep.
 """
 
-# Re-export from new structure
 from .schedules import (
     linear_beta_schedule,
     cosine_beta_schedule,

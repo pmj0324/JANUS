@@ -2,20 +2,34 @@
 Diffusion Module for GENESIS
 =============================
 
-This module contains all diffusion-related components:
-- Gaussian diffusion process (DDPM, DDIM)
-- Noise schedulers (linear, cosine, etc.)
-- Diffusion visualization and analysis tools
-- Distribution analysis (convergence to Gaussian)
+This module contains all diffusion-related components organized by functionality:
+- schedules/: Noise schedulers (linear, cosine, quadratic, sigmoid)
+- forward/: Forward diffusion process (adding noise)
+- gaussian_diffusion.py: Main diffusion model (DDPM, DDIM)
 
-Future: Will also support Flow Matching in a separate 'flow' module.
+Visualization tools are in utils/vis/visualize_forward_diffusion.py
+
+Usage:
+    # Use noise schedules
+    from diffusion.schedules import get_noise_schedule
+    betas = get_noise_schedule("cosine", timesteps=1000, s=0.008)
+    
+    # Apply forward diffusion
+    from diffusion.forward import apply_forward_diffusion
+    x_t = apply_forward_diffusion(x0, betas, timesteps)
+    
+    # Visualize forward diffusion
+    from utils.vis.visualize_forward_diffusion import visualize_forward_diffusion
+    visualize_forward_diffusion(x0, geom, label, schedules, timesteps)
 """
 
 from .gaussian_diffusion import (
     GaussianDiffusion,
     create_gaussian_diffusion
 )
-from .noise_schedules import (
+
+# Import from new organized structure
+from .schedules import (
     linear_beta_schedule,
     cosine_beta_schedule,
     quadratic_beta_schedule,
@@ -23,15 +37,11 @@ from .noise_schedules import (
     get_noise_schedule,
     compute_alpha_schedule
 )
-from .diffusion_utils import (
-    extract,
+
+from .forward import (
     q_sample_batch,
-    visualize_noise_schedule,
-    compare_noise_schedules
+    apply_forward_diffusion
 )
-# Analysis functions moved to forward_data_stats_analysis.py
-# Import them directly if needed:
-# from .forward_data_stats_analysis import analyze_forward_diffusion, batch_analysis
 
 __all__ = [
     # Gaussian diffusion
@@ -46,11 +56,7 @@ __all__ = [
     "get_noise_schedule",
     "compute_alpha_schedule",
     
-    # Utilities
-    "extract",
+    # Forward diffusion
     "q_sample_batch",
-    "visualize_noise_schedule",
-    "compare_noise_schedules",
-    
-    # Analysis functions moved to forward_data_stats_analysis.py
+    "apply_forward_diffusion",
 ]

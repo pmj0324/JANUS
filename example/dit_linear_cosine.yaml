@@ -1,0 +1,103 @@
+# DIT + Linear Noise Schedule + Cosine LR Configuration
+# =====================================================
+# DIT model with linear noise schedule and cosine learning rate scheduler
+
+experiment_name: "dit_linear_cosine"
+description: "DIT model with linear noise schedule and cosine LR scheduler"
+
+# Model configuration (same as default)
+model:
+  architecture: "dit"
+  seq_len: 5160
+  hidden: 256
+  depth: 4
+  heads: 8
+  dropout: 0.1
+  fusion: "FiLM"
+  label_dim: 6
+  t_embed_dim: 128
+  mlp_ratio: 4.0
+  
+  # Normalization metadata
+  affine_offsets: [0.0, 0.0, -600.0, -550.0, -550.0]
+  affine_scales: [200.0, 10.0, 1200.0, 1100.0, 1100.0]
+  label_offsets: [0.0, 0.0, 0.0, -600.0, -550.0, -550.0]
+  label_scales: [100000000.0, 3.14159, 6.28318, 1200.0, 1100.0, 1100.0]
+  time_transform: "ln"
+
+# Diffusion configuration - COSINE SCHEDULE
+diffusion:
+  timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  objective: "eps"
+  schedule: "linear"  # Linear schedule
+  
+  # Classifier-free guidance
+  use_cfg: true
+  cfg_scale: 2.0
+  cfg_dropout: 0.1
+
+# Data configuration (same as default)
+data:
+  h5_path: "GENESIS-data/22644_0921_time_shift.h5"
+  replace_time_inf_with: 0.0
+  channel_first: true
+  batch_size: 512
+  num_workers: 40
+  pin_memory: true
+  shuffle: true
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  
+  # Normalization
+  time_transform: "ln"
+  affine_offsets: [0.0, 0.0, -600.0, -550.0, -550.0]
+  affine_scales: [200.0, 10.0, 1200.0, 1100.0, 1100.0]
+  label_offsets: [0.0, 0.0, 0.0, -600.0, -550.0, -550.0]
+  label_scales: [100000000.0, 3.14159, 6.28318, 1200.0, 1100.0, 1100.0]
+
+# Training configuration - optimized for cosine schedule
+training:
+  num_epochs: 250              # More epochs for cosine schedule
+  learning_rate: 0.0002        # Slightly higher LR for faster convergence
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  optimizer: "AdamW"
+  scheduler: "cosine"          # Cosine annealing scheduler
+  warmup_steps: 1000
+  warmup_ratio: 0.04
+  
+  # Cosine scheduler parameters
+  cosine_t_max: 250            # T_max for cosine annealing
+  
+  # Early stopping
+  early_stopping: true
+  early_stopping_patience: 8   # More patience for cosine schedule
+  early_stopping_min_delta: 1e-4
+  early_stopping_mode: "min"
+  early_stopping_baseline: null
+  early_stopping_restore_best: true
+  early_stopping_verbose: true
+  
+  # Logging and checkpointing
+  log_interval: 50
+  save_interval: 1000
+  eval_interval: 1
+  output_dir: "outputs"
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  resume_from_checkpoint: null
+  use_amp: true
+  debug_mode: false
+  detect_anomaly: false
+
+# System settings
+device: "auto"
+seed: 42
+
+# Logging
+use_wandb: false
+wandb_project: "icecube-diffusion"
+wandb_entity: null
