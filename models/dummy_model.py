@@ -2,7 +2,6 @@
 """
 Dummy Model for GENESIS
 =======================
-
 A simple dummy model that applies scale and offset to the input signal.
 This is useful for testing the diffusion pipeline without training a real model.
 
@@ -16,7 +15,6 @@ Output: (B, 2, L) - Scaled and offset version of input signal
 
 import sys
 from pathlib import Path
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -108,30 +106,29 @@ def create_dummy_model(
 
 if __name__ == "__main__":
     import argparse
-    
     from dataloader.h5 import H5Dataset
     
     parser = argparse.ArgumentParser(description="Test DummyModel with H5 dataset")
     parser.add_argument(
-        "--h5_path",
+        "-f", "--h5_path",
         type=str,
         default="/home/pmj0324/icecube-genesis/0121/GENESIS/GENESIS-data/22644_0921_time_shift.h5",
         help="Path to H5 file (uses H5Dataset from dataloader/h5.py)",
     )
     parser.add_argument(
-        "--batch_size",
+        "-b", "--batch_size",
         type=int,
-        default=4,
+        default=1,
         help="Batch size for testing",
     )
     parser.add_argument(
-        "--scale",
+        "-s", "--scale",
         type=str,
         default="200.0,10.0",
         help="Scale 값 (채널별, 쉼표로 구분, 예: '200.0,10.0')",
     )
     parser.add_argument(
-        "--offset",
+        "-o", "--offset",
         type=str,
         default="0.0,0.0",
         help="Offset 값 (채널별, 쉼표로 구분, 예: '0.0,0.0')",
@@ -147,77 +144,54 @@ if __name__ == "__main__":
     print("Testing DummyModel with H5 Dataset")
     print("=" * 80)
     
-    # Load dataset using H5Dataset from dataloader/h5.py
-    print(f"\n📂 Loading dataset using H5Dataset from dataloader/h5.py")
-    print(f"   H5 file path: {args.h5_path}")
+    # Load dataset
+    print(f"\nLoading dataset: {args.h5_path}")
     dataset = H5Dataset(h5_path=args.h5_path)
-    print(f"✅ Dataset loaded: {len(dataset)} events")
-    print(f"   Waveform length: {dataset.waveform_len}")
+    print(f"Dataset: {len(dataset)} events, waveform length: {dataset.waveform_len}")
     
     # Create dataloader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=0,  # Use 0 for testing
-    )
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     
-    # Create dummy model
-    print(f"\n🤖 Creating DummyModel:")
-    print(f"   Scale (채널별): {scale}")
-    print(f"   Offset (채널별): {offset}")
+    # Create model
+    print(f"Model: scale={scale}, offset={offset}")
     model = DummyModel(scale=scale, offset=offset)
     model.eval()
     
-    # Get device
+    # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n🖥️  Using device: {device}")
+    print(f"Device: {device}")
     model = model.to(device)
     
-    # Test with a few batches
-    print(f"\n🔄 Testing forward pass...")
+    # Test forward pass
+    print("\nTesting forward pass...")
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
-            # Move to device
-            x_sig = batch["sig"].to(device)  # (B, 2, L)
-            geom = batch["geo"].to(device)  # (B, 3, L)
-            label = batch["label"].to(device)  # (B, 6)
-            
-            # Create dummy timestep
+            x_sig = batch["sig"].to(device)
+            geom = batch["geo"].to(device)
+            label = batch["label"].to(device)
             timestep = torch.randint(0, 1000, (x_sig.shape[0],), device=device)
             
-            print(f"\n  Batch {batch_idx + 1}:")
-            print(f"    Signal shape: {x_sig.shape}")
-            print(f"    Geometry shape: {geom.shape}")
-            print(f"    Label shape: {label.shape}")
-            print(f"    Timestep shape: {timestep.shape}")
-            print(f"    Signal range: [{x_sig.min():.4f}, {x_sig.max():.4f}]")
-            print(f"    Signal mean: {x_sig.mean():.4f}, std: {x_sig.std():.4f}")
-            
-            # Forward pass
             output = model(x_sig, timestep, geom, label)
             
-            print(f"    Output shape: {output.shape}")
-            print(f"    Output range: [{output.min():.4f}, {output.max():.4f}]")
-            print(f"    Output mean: {output.mean():.4f}, std: {output.std():.4f}")
-            
-            # Verify output = (input - offset) / scale
+            # Verify output
             scale_tensor = torch.tensor(scale, device=device).view(1, -1, 1)
             offset_tensor = torch.tensor(offset, device=device).view(1, -1, 1)
             expected = (x_sig - offset_tensor) / scale_tensor
             diff = (output - expected).abs().max()
-            print(f"    Max difference from expected: {diff:.6f}")
+            
+            print(f"Batch {batch_idx + 1}: shape={x_sig.shape}, "
+                  f"input_range=[{x_sig.min():.2f}, {x_sig.max():.2f}], "
+                  f"output_range=[{output.min():.2f}, {output.max():.2f}], "
+                  f"max_diff={diff:.6f}", end="")
             
             if diff < 1e-5:
-                print(f"    ✅ Output matches expected (정규화 공식: (x - offset) / scale)")
+                print(" [PASS]")
             else:
-                print(f"    ⚠️  Output differs from expected!")
+                print(" [FAIL]")
             
-            # Only test first batch
             if batch_idx == 0:
                 break
     
-    print(f"\n{'=' * 80}")
-    print("✅ DummyModel test with H5 dataset completed!")
-    print(f"{'=' * 80}")
-
+    print("\n" + "=" * 80)
+    print("Test completed")
+    print("=" * 80)

@@ -2,7 +2,7 @@
 Models for GENESIS
 ==================
 
-Neural network models for diffusion-based PMT signal generation.
+Neural network models for GENESIS.
 """
 
 from .dummy_model import DummyModel
