@@ -262,6 +262,161 @@ def _style_axes(ax: plt.Axes):
     ax.grid(True, alpha=0.3)
 
 
+def show_event_dual_plot(
+    sig: np.ndarray,
+    geo: np.ndarray,
+    label: np.ndarray,
+    output_path: Optional[Union[str, Path]] = None,
+    figure_size: Tuple[int, int] = (20, 10),
+    marker_size: float = 20.0,
+    show_detector_hull: bool = True,
+    show: bool = False,
+    title_prefix: str = "",
+    **kwargs
+) -> Tuple[plt.Figure, Tuple[plt.Axes, plt.Axes]]:
+    """
+    Show a dual 3D visualization of an event with two side-by-side plots.
+    
+    Left plot: firstTime colored by time value
+    Right plot: npe colored by npe value
+    
+    Uses circular markers (not spheres) for non-zero values, colored by the respective values.
+    
+    Args:
+        sig: Signal array with shape (2, L) - [npe, firstTime]
+        geo: Geometry array with shape (3, L) - [x, y, z]
+        label: Label array with shape (6,) - [Energy, Zenith, Azimuth, X, Y, Z]
+        output_path: Path to save the plot (PNG/PDF/SVG). If None, doesn't save.
+        figure_size: Figure size for plots
+        marker_size: Size of markers for non-zero values
+        show_detector_hull: Show detector hull outline
+        show: If True, display the plot with plt.show()
+        title_prefix: Prefix for the plot title
+        **kwargs: Additional arguments (for compatibility)
+    
+    Returns:
+        (fig, (ax1, ax2)): matplotlib Figure and tuple of two Axes3D objects
+    """
+    # Validate input shapes
+    if sig.shape[0] != 2:
+        raise ValueError(f"sig must have shape (2, L), got {sig.shape}")
+    if geo.shape[0] != 3:
+        raise ValueError(f"geo must have shape (3, L), got {geo.shape}")
+    if label.shape[0] != 6:
+        raise ValueError(f"label must have shape (6,), got {label.shape}")
+    
+    L = sig.shape[1]
+    if geo.shape[1] != L:
+        raise ValueError(f"sig and geo must have same L dimension: sig.shape={sig.shape}, geo.shape={geo.shape}")
+    
+    # Extract geometry
+    x = np.asarray(geo[0, :], dtype=np.float32)
+    y = np.asarray(geo[1, :], dtype=np.float32)
+    z = np.asarray(geo[2, :], dtype=np.float32)
+    
+    # Extract event data
+    energy, zenith, azimuth, x_pos, y_pos, z_pos = label
+    npe = np.asarray(sig[0, :], dtype=np.float32)
+    ftime = np.asarray(sig[1, :], dtype=np.float32)
+    
+    # Sanitize firstTime: ±inf → 0
+    ftime[np.isinf(ftime)] = 0.0
+    
+    # Create figure with two subplots
+    fig = plt.figure(figsize=figure_size)
+    ax1 = fig.add_subplot(121, projection="3d")  # Left: firstTime
+    ax2 = fig.add_subplot(122, projection="3d")  # Right: npe
+    
+    # Title - Convert units
+    energy_pev = energy / 1e6  # MeV to PeV
+    zenith_deg = np.degrees(zenith)  # rad to degrees
+    azimuth_deg = np.degrees(azimuth)  # rad to degrees
+    
+    title_line1 = f"{title_prefix}Energy = {energy_pev:.3f} PeV"
+    title_line2 = f"Zenith = {zenith_deg:.3f}°, Azimuth = {azimuth_deg:.3f}°"
+    title_line3 = f"Vertex Position (m) = ({x_pos:.2f}, {y_pos:.2f}, {z_pos:.2f})"
+    fig.suptitle(f"{title_line1}\n{title_line2}\n{title_line3}", fontsize=14, y=0.98)
+    
+    # Detector hull (optional)
+    if show_detector_hull:
+        _draw_detector_hull(ax1, x, y, z)
+        _draw_detector_hull(ax2, x, y, z)
+    
+    # Background dots (all PMTs)
+    ax1.scatter(x, y, z, s=1, c="gray", alpha=0.3)
+    ax2.scatter(x, y, z, s=1, c="gray", alpha=0.3)
+    
+    # Left plot: firstTime
+    nonzero_ftime_mask = (ftime != 0) & np.isfinite(ftime)
+    if nonzero_ftime_mask.any():
+        x_ftime = x[nonzero_ftime_mask]
+        y_ftime = y[nonzero_ftime_mask]
+        z_ftime = z[nonzero_ftime_mask]
+        ftime_vals = ftime[nonzero_ftime_mask]
+        
+        # Color scale for firstTime
+        vmin_ftime = float(np.min(ftime_vals))
+        vmax_ftime = float(np.max(ftime_vals))
+        if vmin_ftime == vmax_ftime:
+            vmax_ftime = vmin_ftime + 1.0
+        
+        norm_ftime = Normalize(vmin=vmin_ftime, vmax=vmax_ftime)
+        cmap_ftime = colormaps["jet"]
+        
+        # Scatter plot with colored markers
+        scatter1 = ax1.scatter(x_ftime, y_ftime, z_ftime, 
+                              c=ftime_vals, s=marker_size, 
+                              cmap=cmap_ftime, norm=norm_ftime,
+                              alpha=0.8, edgecolors='none')
+        
+        # Colorbar for firstTime
+        cbar1 = fig.colorbar(scatter1, ax=ax1, shrink=0.5, aspect=20, pad=0.15)
+        cbar1.set_label('FirstTime (ns)', rotation=270, labelpad=20)
+    
+    ax1.set_title('FirstTime', fontsize=12)
+    _style_axes(ax1)
+    
+    # Right plot: npe
+    nonzero_npe_mask = (npe > 0) & np.isfinite(npe)
+    if nonzero_npe_mask.any():
+        x_npe = x[nonzero_npe_mask]
+        y_npe = y[nonzero_npe_mask]
+        z_npe = z[nonzero_npe_mask]
+        npe_vals = npe[nonzero_npe_mask]
+        
+        # Color scale for npe
+        vmin_npe = float(np.min(npe_vals))
+        vmax_npe = float(np.max(npe_vals))
+        if vmin_npe == vmax_npe:
+            vmax_npe = vmin_npe + 1.0
+        
+        norm_npe = Normalize(vmin=vmin_npe, vmax=vmax_npe)
+        cmap_npe = colormaps["viridis"]
+        
+        # Scatter plot with colored markers
+        scatter2 = ax2.scatter(x_npe, y_npe, z_npe,
+                              c=npe_vals, s=marker_size,
+                              cmap=cmap_npe, norm=norm_npe,
+                              alpha=0.8, edgecolors='none')
+        
+        # Colorbar for npe
+        cbar2 = fig.colorbar(scatter2, ax=ax2, shrink=0.5, aspect=20, pad=0.15)
+        cbar2.set_label('NPE', rotation=270, labelpad=20)
+    
+    ax2.set_title('NPE', fontsize=12)
+    _style_axes(ax2)
+    
+    # Save if requested
+    if output_path:
+        fig.savefig(output_path, transparent=True, bbox_inches="tight")
+        print(f"Event dual visualization saved to {output_path}")
+    
+    if show:
+        plt.show()
+    
+    return fig, (ax1, ax2)
+
+
 def main():
     """Command line interface for event visualization."""
     parser = argparse.ArgumentParser(
