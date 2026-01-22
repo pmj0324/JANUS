@@ -13,7 +13,7 @@ Process:
 """
 
 from __future__ import annotations
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional
 import torch
 import numpy as np
 from .common import is_tensor, is_array
@@ -23,7 +23,9 @@ from .minmax import apply_minmax
 
 def apply_log_minmax(
     data: Union[torch.Tensor, np.ndarray],
-    feature_range: Tuple[float, float] = (0, 1)
+    feature_range: Tuple[float, float] = (0, 1),
+    data_min: Optional[float] = None,
+    data_max: Optional[float] = None
 ) -> Union[torch.Tensor, np.ndarray]:
     """
     Apply log(1+x) transformation followed by minmax normalization.
@@ -31,6 +33,8 @@ def apply_log_minmax(
     Args:
         data: Input tensor or array
         feature_range: Target range (min, max), default (0, 1)
+        data_min: Fixed minimum value for log-transformed data (if None, uses log_data.min())
+        data_max: Fixed maximum value for log-transformed data (if None, uses log_data.max())
     
     Returns:
         Log-transformed and normalized data
@@ -41,11 +45,14 @@ def apply_log_minmax(
         >>> normalized = apply_log_minmax(data, feature_range=(0, 1))
         >>> print(normalized)
         # Data is first log-transformed, then minmax normalized
+        
+        >>> # Use fixed min/max for log-transformed data
+        >>> normalized = apply_log_minmax(data, feature_range=(0, 1), data_min=0.0, data_max=np.log1p(225.0))
     """
     # First apply log transform
     log_data = apply_log_transform(data)
-    # Then apply minmax
-    return apply_minmax(log_data, feature_range)
+    # Then apply minmax with fixed min/max if provided
+    return apply_minmax(log_data, feature_range, data_min=data_min, data_max=data_max)
 
 
 def denormalize_log_minmax(

@@ -26,7 +26,7 @@ sys.path.insert(0, str(project_root))
 from diffusion.schedules import get_noise_schedule, compute_alpha_schedule
 from diffusion.forward import apply_forward_diffusion
 from utils.vis.event_show import show_event_dual_plot
-from utils.normalize import normalize
+from utils.normalize import normalize, denormalize_minmax
 
 
 def plot_histograms(
@@ -138,10 +138,13 @@ def plot_histograms(
 
 
 @normalize(
-    channel_methods=['minmax', 'minmax'],
-    feature_ranges=[(0, 1), (0, 1)],  # Both channels normalized to [0, 1]
+    channel_methods=['log_minmax', 'log_minmax'],
     arg_index=0,  # Normalize first argument (x0_sig)
-    denormalize=False  # We'll denormalize manually inside the function
+    denormalize=False,  # We'll denormalize manually inside the function
+    channel_stats=[
+        {'log_min': 0.0, 'log_max': np.log1p(225.0)},      # npe: log(1+0)=0, log(1+225)
+        {'log_min': 0.0, 'log_max': np.log1p(20676.0)}     # firstTime: log(1+0)=0, log(1+20676)
+    ]
 )
 def visualize_forward_diffusion(
     x0_sig: torch.Tensor,
@@ -158,15 +161,15 @@ def visualize_forward_diffusion(
     """
     Visualize forward diffusion process with multiple noise schedules.
     
-    This function automatically normalizes input signals:
-    - npe channel (x0_sig[:, 0, :]): minmax normalization [0, 1]
-    - firstTime channel (x0_sig[:, 1, :]): minmax normalization [0, 1]
+    This function automatically normalizes input signals using fixed dataset-wide min/max with log_minmax:
+    - npe channel (x0_sig[:, 0, :]): log_minmax normalization [0, 1] using fixed min=0, max=225
+    - firstTime channel (x0_sig[:, 1, :]): log_minmax normalization [0, 1] using fixed min=0, max=20676
     
-    The visualization uses normalized values [0, 1] directly (no denormalization).
+    Forward diffusion uses normalized data [0, 1], visualization denormalizes back to original scale.
     
     Args:
         x0_sig: Clean signals (B, 2, L) - automatically normalized by decorator
-            Original ranges: npe [0, 225], firstTime [0, 20676]
+            Normalized using log_minmax: npe [0, 225] -> log(1+x) -> [0, 1], firstTime [0, 20676] -> log(1+x) -> [0, 1]
         geom: Geometry (B, 3, L)
         label: Labels (B, 6)
         schedules: List of (schedule_name, schedule_kwargs) tuples
@@ -187,7 +190,34 @@ def visualize_forward_diffusion(
     assert C == 2, "Signal must have 2 channels (nPE, firstTime)"
     
     # x0_sig is already normalized by decorator to [0, 1]
-    # We use normalized values directly for visualization (no denormalization needed)
+    # Get normalization statistics for denormalization during visualization
+    if hasattr(visualize_forward_diffusion, '_normalization_stats'):
+        channel_stats = visualize_forward_diffusion._normalization_stats
+        npe_stats = channel_stats[0]
+        firstTime_stats = channel_stats[1]
+        
+        # Print normalization parameters used
+        print(f"\nNormalization parameters:")
+        print(f"  npe channel (log_minmax):")
+        if 'log_min' in npe_stats and 'log_max' in npe_stats:
+            print(f"    log_min: {npe_stats.get('log_min', 'N/A'):.6f}")
+            print(f"    log_max: {npe_stats.get('log_max', 'N/A'):.6f}")
+            print(f"    (original max: {np.expm1(npe_stats.get('log_max', 0)):.6f})")
+        else:
+            print(f"    min: {npe_stats.get('min', 'N/A'):.6f}")
+            print(f"    max: {npe_stats.get('max', 'N/A'):.6f}")
+        print(f"  firstTime channel (log_minmax):")
+        if 'log_min' in firstTime_stats and 'log_max' in firstTime_stats:
+            print(f"    log_min: {firstTime_stats.get('log_min', 'N/A'):.6f}")
+            print(f"    log_max: {firstTime_stats.get('log_max', 'N/A'):.6f}")
+            print(f"    (original max: {np.expm1(firstTime_stats.get('log_max', 0)):.6f})")
+        else:
+            print(f"    min: {firstTime_stats.get('min', 'N/A'):.6f}")
+            print(f"    max: {firstTime_stats.get('max', 'N/A'):.6f}")
+    else:
+        npe_stats = None
+        firstTime_stats = None
+        print("\nWarning: Normalization statistics not available")
     
     # Extract single sample if batch
     if B > 1:
@@ -243,13 +273,32 @@ def visualize_forward_diffusion(
             # Convert to numpy
             x_t_np = x_t[0].cpu().numpy()  # (2, L) - normalized [0, 1]
             
-            # Use normalized values directly for visualization (no denormalization)
-            # x_t_np is already normalized to [0, 1] for both channels
-            x_t_vis = x_t_np.copy()
+            # Denormalize for visualization (back to original scale)
+            # Forward diffusion uses normalized data, but visualization shows original scale
+            if npe_stats is not None and firstTime_stats is not None:
+                from utils.normalize import denormalize_log_minmax
+                x_t_vis = x_t_np.copy()
+                # Denormalize npe channel: [0, 1] -> log scale -> original scale
+                x_t_vis[0, :] = denormalize_log_minmax(
+                    torch.from_numpy(x_t_np[0, :]),
+                    npe_stats.get('log_min', 0.0),
+                    npe_stats.get('log_max', np.log1p(225.0)),
+                    feature_range=(0, 1)
+                ).numpy()
+                # Denormalize firstTime channel: [0, 1] -> log scale -> original scale
+                x_t_vis[1, :] = denormalize_log_minmax(
+                    torch.from_numpy(x_t_np[1, :]),
+                    firstTime_stats.get('log_min', 0.0),
+                    firstTime_stats.get('log_max', np.log1p(20676.0)),
+                    feature_range=(0, 1)
+                ).numpy()
+            else:
+                # Fallback: use normalized values if stats not available
+                x_t_vis = x_t_np.copy()
             
-            # Extract nPE and firstTime (normalized values)
-            npe = x_t_vis[0]  # (L,) - normalized [0, 1]
-            ftime = x_t_vis[1]  # (L,) - normalized [0, 1]
+            # Extract nPE and firstTime (denormalized to original scale)
+            npe = x_t_vis[0]  # (L,) - denormalized to original scale
+            ftime = x_t_vis[1]  # (L,) - denormalized to original scale
             
             # Sanitize firstTime
             ftime = np.nan_to_num(ftime, nan=0.0, posinf=0.0, neginf=0.0)

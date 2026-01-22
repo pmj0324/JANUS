@@ -10,7 +10,7 @@ Formula: (x - min) / (max - min) * (max_range - min_range) + min_range
 """
 
 from __future__ import annotations
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional
 import torch
 import numpy as np
 from .common import is_tensor, is_array
@@ -18,7 +18,9 @@ from .common import is_tensor, is_array
 
 def apply_minmax(
     data: Union[torch.Tensor, np.ndarray], 
-    feature_range: Tuple[float, float] = (0, 1)
+    feature_range: Tuple[float, float] = (0, 1),
+    data_min: Optional[float] = None,
+    data_max: Optional[float] = None
 ) -> Union[torch.Tensor, np.ndarray]:
     """
     Apply Min-Max normalization to data.
@@ -26,6 +28,8 @@ def apply_minmax(
     Args:
         data: Input tensor or array
         feature_range: Target range (min, max), default (0, 1)
+        data_min: Fixed minimum value for normalization (if None, uses data.min())
+        data_max: Fixed maximum value for normalization (if None, uses data.max())
     
     Returns:
         Normalized data in the specified range
@@ -36,25 +40,36 @@ def apply_minmax(
         >>> normalized = apply_minmax(data, feature_range=(0, 1))
         >>> print(normalized)
         tensor([0.0000, 0.2500, 0.5000, 0.7500, 1.0000])
+        
+        >>> # Use fixed min/max from dataset
+        >>> normalized = apply_minmax(data, feature_range=(0, 1), data_min=0.0, data_max=10.0)
     """
+    # Use fixed min/max if provided, otherwise use data's min/max
+    if data_min is None or data_max is None:
+        if is_tensor(data):
+            computed_min = data.min().item() if data_min is None else data_min
+            computed_max = data.max().item() if data_max is None else data_max
+        else:
+            computed_min = data.min() if data_min is None else data_min
+            computed_max = data.max() if data_max is None else data_max
+    else:
+        computed_min = data_min
+        computed_max = data_max
+    
     if is_tensor(data):
-        data_min = data.min()
-        data_max = data.max()
-        if data_max - data_min == 0:
+        if computed_max - computed_min == 0:
             # Avoid division by zero
             return torch.zeros_like(data) + feature_range[0]
         
-        normalized = (data - data_min) / (data_max - data_min)
+        normalized = (data - computed_min) / (computed_max - computed_min)
         # Scale to feature_range
         normalized = normalized * (feature_range[1] - feature_range[0]) + feature_range[0]
         return normalized
     elif is_array(data):
-        data_min = data.min()
-        data_max = data.max()
-        if data_max - data_min == 0:
+        if computed_max - computed_min == 0:
             return np.zeros_like(data) + feature_range[0]
         
-        normalized = (data - data_min) / (data_max - data_min)
+        normalized = (data - computed_min) / (computed_max - computed_min)
         normalized = normalized * (feature_range[1] - feature_range[0]) + feature_range[0]
         return normalized
     else:
