@@ -144,7 +144,7 @@ from diffusion.forward import apply_forward_diffusion
 
 def load_event_and_config(config_path: str, event_index: int):
     """Load event from dataloader."""
-    print(f"\n📂 Loading configuration from: {config_path}")
+    print(f"\n Loading configuration from: {config_path}")
     config = load_config_from_file(config_path)
     
     # Extract normalization parameters
@@ -165,58 +165,36 @@ def load_event_and_config(config_path: str, event_index: int):
         h5_path = project_root / h5_path
         h5_path = str(h5_path.resolve())
     
-    print(f"📂 Loading dataset from: {h5_path}")
+    print(f" Loading dataset from: {h5_path}")
     dataset = H5Dataset(h5_path=h5_path)
     
-    print(f"✅ Dataset loaded: {len(dataset)} events total")
+    print(f" Dataset loaded: {len(dataset)} events total")
     
     # Check if index is valid
     if event_index < 0 or event_index >= len(dataset):
-        print(f"❌ Invalid event index: {event_index} (dataset size: {len(dataset)})")
+        print(f" Invalid event index: {event_index} (dataset size: {len(dataset)})")
         sys.exit(1)
     
-    # Load event (H5Dataset returns dict: {"sig": sig, "geo": geo, "label": label})
-    sample_dict = dataset[event_index]
-    sig_raw = sample_dict["sig"]  # (2, L)
-    geo_raw = sample_dict["geo"]  # (3, L)
-    label_raw = sample_dict["label"]  # (6,)
+    # Load event (H5Dataset returns tuple: (sig, geo, label))
+    sig_raw, geo_raw, label_raw = dataset[event_index]
+    # sig_raw: (2, L) - 원본 데이터 (정규화되지 않음)
+    # geo_raw: (3, L)
+    # label_raw: (6,)
     
-    # Normalize signals
-    # Handle time transform and replace inf
-    sig_normalized = sig_raw.clone()
-    if config.data.time_transform == "ln":
-        # Apply ln(1 + time) transform
-        sig_normalized[1, :] = torch.log1p(torch.clamp(sig_raw[1, :], min=0.0))
-    elif config.data.time_transform == "log10":
-        # Apply log10(1 + time) transform
-        sig_normalized[1, :] = torch.log10(1.0 + torch.clamp(sig_raw[1, :], min=0.0))
-    
-    # Replace inf with 0
-    sig_normalized[torch.isinf(sig_normalized)] = 0.0
-    
-    # Apply affine normalization: (x - offset) / scale
-    for i in range(2):  # For signal channels (nPE, firstTime)
-        sig_normalized[i, :] = (sig_normalized[i, :] - affine_offsets[i]) / affine_scales[i]
-    
-    # Normalize geometry
-    geo_normalized = geo_raw.clone()
-    for i in range(3):  # For geometry channels (x, y, z)
-        geo_normalized[i, :] = (geo_normalized[i, :] - affine_offsets[i + 2]) / affine_scales[i + 2]
-    
-    # Normalize labels
-    label_normalized = label_raw.clone()
-    for i in range(6):  # For label channels
-        label_normalized[i] = (label_normalized[i] - label_offsets[i]) / label_scales[i]
-    
+    # visualize_forward_diffusion 함수의 데코레이터가 자동으로 정규화하므로
+    # 원본 데이터를 전달합니다 (minmax 정규화는 데코레이터가 처리)
     # Add batch dimension
-    x_sig = sig_normalized.unsqueeze(0)    # (1, 2, 5160)
-    geom = geo_normalized.unsqueeze(0)     # (1, 3, 5160)
-    labels = label_normalized.unsqueeze(0)   # (1, 6)
+    x_sig = sig_raw.unsqueeze(0)    # (1, 2, 5160) - 원본 데이터
+    geom = geo_raw.unsqueeze(0)     # (1, 3, 5160)
+    labels = label_raw.unsqueeze(0)   # (1, 6)
     
-    print(f"✅ Event {event_index} loaded:")
+    print(f" Event {event_index} loaded:")
     print(f"   Signal shape: {x_sig.shape}")
+    print(f"   Signal range - npe: [{x_sig[0, 0, :].min():.2f}, {x_sig[0, 0, :].max():.2f}]")
+    print(f"   Signal range - firstTime: [{x_sig[0, 1, :].min():.2f}, {x_sig[0, 1, :].max():.2f}]")
     print(f"   Geometry shape: {geom.shape}")
     print(f"   Labels shape: {labels.shape}")
+    print(f"   Note: Signal will be normalized by visualize_forward_diffusion decorator")
     
     return x_sig, geom, labels, config
 
@@ -330,7 +308,7 @@ def main():
     args = parser.parse_args()
     
     print("\n" + "="*80)
-    print("🎨 Forward Diffusion Visualization")
+    print(" Forward Diffusion Visualization")
     print("="*80)
     
     # Load event and config
@@ -347,10 +325,10 @@ def main():
     # Validate timesteps
     timesteps = sorted(set(args.timesteps))
     if timesteps[0] != 0:
-        print("⚠️  Warning: Adding t=0 to timesteps (original data)")
+        print("  Warning: Adding t=0 to timesteps (original data)")
         timesteps.insert(0, 0)
     if timesteps[-1] >= timesteps_total:
-        print(f"⚠️  Warning: Clamping timesteps to max {timesteps_total-1}")
+        print(f"  Warning: Clamping timesteps to max {timesteps_total-1}")
         timesteps = [t for t in timesteps if t < timesteps_total]
         if timesteps[-1] != timesteps_total - 1:
             timesteps.append(timesteps_total - 1)
@@ -366,22 +344,21 @@ def main():
             schedule_kwargs["beta_end"] = args.beta_end
         schedules.append((schedule_name, schedule_kwargs))
     
-    # Create denormalization function
-    denormalize_fn = create_denormalize_fn(config)
-    
     # Move to device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     x_sig = x_sig.to(device)
     geom = geom.to(device)
     
-    print(f"\n📊 Visualization settings:")
+    print(f"\n Visualization settings:")
     print(f"   Timesteps: {timesteps}")
     print(f"   Schedules: {[s[0] for s in schedules]}")
     print(f"   Save 3D plots: {not args.no_3d}")
     print(f"   Save histograms: {not args.no_histograms}")
     print(f"   Output directory: {args.output_dir}")
+    print(f"   Note: Signal normalization handled by visualize_forward_diffusion decorator")
     
     # Visualize
+    # denormalize_fn은 None으로 설정 (데코레이터가 자동으로 역정규화함)
     visualize_forward_diffusion(
         x0_sig=x_sig,
         geom=geom,
@@ -392,11 +369,11 @@ def main():
         detector_csv=args.detector_csv,
         save_3d=not args.no_3d,
         save_histograms=not args.no_histograms,
-        denormalize_fn=denormalize_fn,
+        denormalize_fn=None,  # 데코레이터가 자동으로 역정규화하므로 None
     )
     
     print("\n" + "="*80)
-    print("✅ Visualization complete!")
+    print(" Visualization complete!")
     print("="*80)
 
 

@@ -238,8 +238,8 @@ class GaussianDiffusion(nn.Module):
         """
         DDPM sampling: generate samples from p(x|c).
         
-        ⚠️ IMPORTANT: Reverse diffusion operates in NORMALIZED space!
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+         IMPORTANT: Reverse diffusion operates in NORMALIZED space!
+        
         The reverse diffusion process (T → 0) happens ENTIRELY in normalized space.
         
         Step-by-step process:
@@ -264,7 +264,7 @@ class GaussianDiffusion(nn.Module):
             samples_raw = diffusion.sample(label, geom, shape, denormalize=True)
             # Already in physical units (NPE, ns)
             ```
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         
         Args:
             label: Conditions (B, 6) - should be NORMALIZED
@@ -336,9 +336,9 @@ class GaussianDiffusion(nn.Module):
             if return_all_timesteps:
                 all_samples.append(x)
         
-        # ═══════════════════════════════════════════════════════════════
+        # 
         # Denormalization (ONLY at the END, after complete reverse diffusion!)
-        # ═══════════════════════════════════════════════════════════════
+        # 
         if denormalize:
             x = self._denormalize_samples(x)
             if return_all_timesteps:

@@ -26,6 +26,7 @@ sys.path.insert(0, str(project_root))
 from diffusion.schedules import get_noise_schedule, compute_alpha_schedule
 from diffusion.forward import apply_forward_diffusion
 from utils.vis.event_show import show_event_dual_plot
+from utils.normalize import normalize
 
 
 def plot_histograms(
@@ -39,9 +40,12 @@ def plot_histograms(
     """
     Create histogram plots for nPE and firstTime.
     
+    X-axis range is set to be centered at 0 for better visualization of Gaussian distribution at final timestep.
+    Data remains in [0, 1] range (no transformation).
+    
     Args:
-        npe_data: NPE values (L,)
-        ftime_data: firstTime values (L,)
+        npe_data: NPE values (L,) - normalized [0, 1]
+        ftime_data: firstTime values (L,) - normalized [0, 1]
         output_path: Output directory path
         t_val: Timestep value
         schedule_name: Name of the noise schedule
@@ -49,11 +53,21 @@ def plot_histograms(
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     
-    # NPE histogram
-    npe_valid = npe_data[npe_data > 0]
+    # NPE histogram - use data as is [0, 1]
+    npe_valid = npe_data[np.isfinite(npe_data)]
     if len(npe_valid) > 0:
+        # Calculate x-axis range to fit all data with padding, centered at 0
+        data_min = npe_valid.min()
+        data_max = npe_valid.max()
+        # Find the maximum absolute distance from 0 to ensure symmetric range
+        max_dist_from_zero = max(abs(data_min), abs(data_max))
+        # Add 15% padding for better visibility
+        x_range = max_dist_from_zero * 1.15
+        # Ensure minimum range for visibility (at least show [0, 1] range)
+        x_range = max(x_range, 0.5)
+        
         ax1.hist(npe_valid, bins=50, alpha=0.7, color='blue', edgecolor='black')
-        ax1.set_xlabel('NPE')
+        ax1.set_xlabel('NPE (normalized)')
         ax1.set_ylabel('Count')
         title = f'NPE Distribution t={t_val}'
         if schedule_name:
@@ -61,7 +75,9 @@ def plot_histograms(
         if title_suffix:
             title += title_suffix
         ax1.set_title(title)
-        ax1.set_yscale('log')
+        ax1.set_yscale('linear')  # Use linear scale for y-axis
+        ax1.set_xlim(-x_range, x_range)  # Set x-axis range centered at 0
+        ax1.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5, label='0')
         ax1.grid(True, alpha=0.3)
         
         # Add statistics
@@ -72,11 +88,21 @@ def plot_histograms(
         ax1.axvline(mean_npe - std_npe, color='orange', linestyle='--', alpha=0.7)
         ax1.legend()
     
-    # firstTime histogram
-    ftime_valid = ftime_data[(ftime_data > 0) & np.isfinite(ftime_data)]
+    # firstTime histogram - use data as is [0, 1]
+    ftime_valid = ftime_data[np.isfinite(ftime_data)]
     if len(ftime_valid) > 0:
+        # Calculate x-axis range to fit all data with padding, centered at 0
+        data_min = ftime_valid.min()
+        data_max = ftime_valid.max()
+        # Find the maximum absolute distance from 0 to ensure symmetric range
+        max_dist_from_zero = max(abs(data_min), abs(data_max))
+        # Add 15% padding for better visibility
+        x_range = max_dist_from_zero * 1.15
+        # Ensure minimum range for visibility (at least show [0, 1] range)
+        x_range = max(x_range, 0.5)
+        
         ax2.hist(ftime_valid, bins=50, alpha=0.7, color='green', edgecolor='black')
-        ax2.set_xlabel('FirstTime (ns)')
+        ax2.set_xlabel('FirstTime (normalized)')
         ax2.set_ylabel('Count')
         title = f'FirstTime Distribution t={t_val}'
         if schedule_name:
@@ -84,14 +110,16 @@ def plot_histograms(
         if title_suffix:
             title += title_suffix
         ax2.set_title(title)
-        ax2.set_yscale('log')
+        ax2.set_yscale('linear')  # Use linear scale for y-axis
+        ax2.set_xlim(-x_range, x_range)  # Set x-axis range centered at 0
+        ax2.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5, label='0')
         ax2.grid(True, alpha=0.3)
         
         # Add statistics
         mean_ftime = np.mean(ftime_valid)
         std_ftime = np.std(ftime_valid)
-        ax2.axvline(mean_ftime, color='red', linestyle='--', label=f'Mean: {mean_ftime:.1f}')
-        ax2.axvline(mean_ftime + std_ftime, color='orange', linestyle='--', alpha=0.7, label=f'±1σ: {std_ftime:.1f}')
+        ax2.axvline(mean_ftime, color='red', linestyle='--', label=f'Mean: {mean_ftime:.3f}')
+        ax2.axvline(mean_ftime + std_ftime, color='orange', linestyle='--', alpha=0.7, label=f'±1σ: {std_ftime:.3f}')
         ax2.axvline(mean_ftime - std_ftime, color='orange', linestyle='--', alpha=0.7)
         ax2.legend()
     
@@ -109,6 +137,12 @@ def plot_histograms(
     return hist_path
 
 
+@normalize(
+    channel_methods=['minmax', 'minmax'],
+    feature_ranges=[(0, 1), (0, 1)],  # Both channels normalized to [0, 1]
+    arg_index=0,  # Normalize first argument (x0_sig)
+    denormalize=False  # We'll denormalize manually inside the function
+)
 def visualize_forward_diffusion(
     x0_sig: torch.Tensor,
     geom: torch.Tensor,
@@ -124,10 +158,17 @@ def visualize_forward_diffusion(
     """
     Visualize forward diffusion process with multiple noise schedules.
     
+    This function automatically normalizes input signals:
+    - npe channel (x0_sig[:, 0, :]): minmax normalization [0, 1]
+    - firstTime channel (x0_sig[:, 1, :]): minmax normalization [0, 1]
+    
+    The visualization uses normalized values [0, 1] directly (no denormalization).
+    
     Args:
-        x0_sig: Clean signals (B, 2, L) - normalized
-        geom: Geometry (B, 3, L) - normalized
-        label: Labels (B, 6) - normalized
+        x0_sig: Clean signals (B, 2, L) - automatically normalized by decorator
+            Original ranges: npe [0, 225], firstTime [0, 20676]
+        geom: Geometry (B, 3, L)
+        label: Labels (B, 6)
         schedules: List of (schedule_name, schedule_kwargs) tuples
             Example: [("linear", {}), ("cosine", {"s": 0.008})]
         timesteps: List of timesteps to visualize (e.g., [0, 100, 500, 999])
@@ -135,7 +176,7 @@ def visualize_forward_diffusion(
         detector_csv: Path to detector geometry CSV
         save_3d: Whether to save 3D plots
         save_histograms: Whether to save histograms
-        denormalize_fn: Optional function to denormalize signals
+        denormalize_fn: Optional function to denormalize signals (deprecated, auto-denormalize is used)
             Should take (sig_norm, ...) and return sig_raw
     """
     output_path = Path(output_dir)
@@ -144,6 +185,9 @@ def visualize_forward_diffusion(
     device = x0_sig.device
     B, C, L = x0_sig.shape
     assert C == 2, "Signal must have 2 channels (nPE, firstTime)"
+    
+    # x0_sig is already normalized by decorator to [0, 1]
+    # We use normalized values directly for visualization (no denormalization needed)
     
     # Extract single sample if batch
     if B > 1:
@@ -197,17 +241,15 @@ def visualize_forward_diffusion(
             )
             
             # Convert to numpy
-            x_t_np = x_t[0].cpu().numpy()  # (2, L)
+            x_t_np = x_t[0].cpu().numpy()  # (2, L) - normalized [0, 1]
             
-            # Denormalize if function provided
-            if denormalize_fn is not None:
-                x_t_vis = denormalize_fn(x_t_np)
-            else:
-                x_t_vis = x_t_np
+            # Use normalized values directly for visualization (no denormalization)
+            # x_t_np is already normalized to [0, 1] for both channels
+            x_t_vis = x_t_np.copy()
             
-            # Extract nPE and firstTime
-            npe = x_t_vis[0]  # (L,)
-            ftime = x_t_vis[1]  # (L,)
+            # Extract nPE and firstTime (normalized values)
+            npe = x_t_vis[0]  # (L,) - normalized [0, 1]
+            ftime = x_t_vis[1]  # (L,) - normalized [0, 1]
             
             # Sanitize firstTime
             ftime = np.nan_to_num(ftime, nan=0.0, posinf=0.0, neginf=0.0)
@@ -230,9 +272,9 @@ def visualize_forward_diffusion(
                         show=False,
                         title_prefix=f"t={t_val} ({schedule_name}) - "
                     )
-                    print(f"    ✅ 3D plot saved: {png_path}")
+                    print(f"     3D plot saved: {png_path}")
                 except Exception as e:
-                    print(f"    ⚠️  3D plot failed: {e}")
+                    print(f"      3D plot failed: {e}")
             
             # Save histograms
             if save_histograms:
@@ -244,11 +286,11 @@ def visualize_forward_diffusion(
                         t_val=t_val,
                         schedule_name=schedule_name,
                     )
-                    print(f"    ✅ Histogram saved: {hist_path}")
+                    print(f"     Histogram saved: {hist_path}")
                 except Exception as e:
-                    print(f"    ⚠️  Histogram failed: {e}")
+                    print(f"      Histogram failed: {e}")
     
     print(f"\n{'='*80}")
-    print(f"✅ Visualization complete!")
-    print(f"📁 Files saved to: {output_path}")
+    print(f" Visualization complete!")
+    print(f" Files saved to: {output_path}")
     print(f"{'='*80}")

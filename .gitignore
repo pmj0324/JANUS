@@ -99,7 +99,7 @@ dev-logs/
 
 # Data files (uncomment if you don't want to track data)
 .diffusion_analysis/
-# GENESIS-data/ - 폴더는 추적하되 내용물만 무시
+# GENESIS-data/ -    
 GENESIS-data/*
 !GENESIS-data/.gitkeep
 # data/

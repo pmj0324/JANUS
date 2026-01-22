@@ -525,10 +525,10 @@ def main():
             title_prefix=args.title_prefix
         )
         
-        print("✅ Event visualization completed successfully!")
+        print(" Event visualization completed successfully!")
         
     except Exception as e:
-        print(f"❌ Error creating visualization: {e}")
+        print(f" Error creating visualization: {e}")
         sys.exit(1)
 
 

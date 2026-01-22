@@ -6,17 +6,17 @@ Plot Event Distributions
 Plot histograms of nPE and firstTime distributions across all events in the dataset.
 
 Usage:
-    # 데이터 저장하면서 히스토그램 생성 (기본값: 저장함)
+    #     (: )
     python plot_event_distributions.py \
         --config dit_linear_cosine.yaml \
         --output event_distributions.png
 
-    # 저장된 데이터로 빠르게 다시 그리기
+    #     
     python plot_event_distributions.py \
         --load-data event_distributions.npz \
         --output event_distributions_quick.png
     
-    # 데이터 저장하지 않고 히스토그램만 생성
+    #     
     python plot_event_distributions.py \
         --config dit_linear_cosine.yaml \
         --no-save-data \
@@ -191,7 +191,7 @@ def plot_distributions(
             npe_all=npe_all,
             ftime_all=ftime_all
         )
-        print(f"💾 Histogram data saved: {histogram_data_path}")
+        print(f" Histogram data saved: {histogram_data_path}")
     
     # Create 2x2 subplot layout
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
@@ -352,7 +352,7 @@ def plot_distributions(
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     
-    print(f"✅ Histogram saved: {output_path}")
+    print(f" Histogram saved: {output_path}")
 
 
 def main():
@@ -431,12 +431,12 @@ def main():
     args = parser.parse_args()
     
     print("\n" + "="*80)
-    print("📊 Event Distribution Analysis (Parallel Processing)")
+    print(" Event Distribution Analysis (Parallel Processing)")
     print("="*80)
     
     # Check if loading from saved data
     if args.load_data:
-        print(f"\n📂 Loading histogram data from: {args.load_data}")
+        print(f"\n Loading histogram data from: {args.load_data}")
         data = np.load(args.load_data)
         npe_hist_combined = data['npe_hist']
         ftime_hist_combined = data['ftime_hist']
@@ -445,12 +445,12 @@ def main():
         npe_all = data['npe_all']
         ftime_all = data['ftime_all']
         
-        print(f"✅ Loaded histogram data:")
+        print(f" Loaded histogram data:")
         print(f"   nPE values: {len(npe_all):,}")
         print(f"   firstTime values: {len(ftime_all):,}")
     else:
         # Load config
-        print(f"\n📂 Loading configuration from: {args.config}")
+        print(f"\n Loading configuration from: {args.config}")
         config = load_config_from_file(args.config)
         
         # Handle h5_path: if relative, make it relative to project root
@@ -464,22 +464,22 @@ def main():
             h5_path = project_root / h5_path
             h5_path = str(h5_path.resolve())
         
-        print(f"📂 Loading dataset from: {h5_path}")
+        print(f" Loading dataset from: {h5_path}")
         dataset = H5Dataset(h5_path=h5_path)
         
         total_events = len(dataset)
         max_events = args.max_events if args.max_events is not None else total_events
         max_events = min(max_events, total_events)
         
-        print(f"✅ Dataset loaded: {total_events} events total")
-        print(f"📊 Processing {max_events} events...")
+        print(f" Dataset loaded: {total_events} events total")
+        print(f" Processing {max_events} events...")
         
         # Determine number of workers
         num_workers = args.num_workers if args.num_workers is not None else cpu_count()
-        print(f"🔧 Using {num_workers} parallel workers")
+        print(f" Using {num_workers} parallel workers")
         
         # First pass: determine bin ranges by sampling
-        print(f"\n📊 Sampling data to determine bin ranges...")
+        print(f"\n Sampling data to determine bin ranges...")
         sample_size = min(10000, max_events)
         sample_indices = np.linspace(0, max_events - 1, sample_size, dtype=int)
         
@@ -502,7 +502,7 @@ def main():
                 continue
         
         if len(npe_sample) == 0 or len(ftime_sample) == 0:
-            print("❌ Error: No valid data in sample!")
+            print(" Error: No valid data in sample!")
             sys.exit(1)
         
         # Determine bin ranges
@@ -535,7 +535,7 @@ def main():
             ))
         
         # Process batches in parallel
-        print(f"\n📊 Processing {num_batches} batches in parallel...")
+        print(f"\n Processing {num_batches} batches in parallel...")
         with Pool(processes=num_workers) as pool:
             results = list(tqdm(
                 pool.imap(process_event_batch, batch_args),
@@ -561,12 +561,12 @@ def main():
         npe_all = np.concatenate(npe_all_list) if npe_all_list else np.array([])
         ftime_all = np.concatenate(ftime_all_list) if ftime_all_list else np.array([])
         
-        print(f"\n📊 Collected data:")
+        print(f"\n Collected data:")
         print(f"   nPE values: {len(npe_all):,}")
         print(f"   firstTime values: {len(ftime_all):,}")
         
         if len(npe_all) == 0 or len(ftime_all) == 0:
-            print("❌ Error: No valid data collected!")
+            print(" Error: No valid data collected!")
             sys.exit(1)
         
         # Create bin edges
@@ -588,7 +588,7 @@ def main():
         histogram_data_path = output_path.with_suffix('.npz')
     
     # Create histogram
-    print(f"\n📊 Creating histograms...")
+    print(f"\n Creating histograms...")
     plot_distributions(
         npe_hist=npe_hist_combined,
         ftime_hist=ftime_hist_combined,
@@ -602,8 +602,8 @@ def main():
     )
     
     print("\n" + "="*80)
-    print("✅ Distribution analysis complete!")
-    print(f"📁 Histogram saved to: {output_path}")
+    print(" Distribution analysis complete!")
+    print(f" Histogram saved to: {output_path}")
     print("="*80)
 
 

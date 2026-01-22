@@ -29,15 +29,15 @@ class DummyModel(nn.Module):
     """
     Dummy model that normalizes input signals using scale and offset.
     
-    정규화 공식: output = (input - offset) / scale
+     : output = (input - offset) / scale
     
-    각 채널마다 다른 offset과 scale을 적용합니다:
-    - 채널 0 (nPE): (x - offset[0]) / scale[0]
-    - 채널 1 (firstTime): (x - offset[1]) / scale[1]
+       offset scale :
+    -  0 (nPE): (x - offset[0]) / scale[0]
+    -  1 (firstTime): (x - offset[1]) / scale[1]
     
     Args:
-        scale: Scale 값 (채널별로 리스트로 지정 가능, 예: [200.0, 10.0])
-        offset: Offset 값 (채널별로 리스트로 지정 가능, 예: [0.0, 0.0])
+        scale: Scale  (   , : [200.0, 10.0])
+        offset: Offset  (   , : [0.0, 0.0])
     """
     
     def __init__(
@@ -47,14 +47,14 @@ class DummyModel(nn.Module):
     ):
         super().__init__()
         
-        # scale과 offset을 리스트로 변환
+        # scale offset  
         if isinstance(scale, (int, float)):
             scale = [scale, scale]
         if isinstance(offset, (int, float)):
             offset = [offset, offset]
         
-        # Fixed 파라미터로 저장 (학습 안 함)
-        # shape: (2, 1, 1) - 채널 2개, 배치와 길이 차원은 브로드캐스팅
+        # Fixed   (  )
+        # shape: (2, 1, 1) -  2,    
         self.register_buffer("scale", torch.tensor(scale).view(2, 1, 1).float())
         self.register_buffer("offset", torch.tensor(offset).view(2, 1, 1).float())
     
@@ -66,22 +66,22 @@ class DummyModel(nn.Module):
         label: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Forward pass: 정규화 적용 (x - offset) / scale
+        Forward pass:   (x - offset) / scale
         
         Args:
             x_sig: Input signal (B, 2, L) - [nPE, firstTime]
-            timestep: Diffusion timestep (B,) - 무시됨
-            geom: Geometry (B, 3, L) - 무시됨
-            label: Event labels (B, 6) - 무시됨
+            timestep: Diffusion timestep (B,) - 
+            geom: Geometry (B, 3, L) - 
+            label: Event labels (B, 6) - 
         
         Returns:
-            정규화된 신호 (B, 2, L)
+              (B, 2, L)
         """
-        # 브로드캐스팅을 위해 reshape: (2, 1, 1) -> (1, 2, 1)
+        #   reshape: (2, 1, 1) -> (1, 2, 1)
         scale = self.scale.view(1, -1, 1)  # (1, 2, 1)
         offset = self.offset.view(1, -1, 1)  # (1, 2, 1)
         
-        # 정규화: (x - offset) / scale
+        # : (x - offset) / scale
         output = (x_sig - offset) / scale
         
         return output
@@ -95,8 +95,8 @@ def create_dummy_model(
     Factory function to create a DummyModel instance.
     
     Args:
-        scale: Scale 값 (채널별 리스트 또는 단일 값)
-        offset: Offset 값 (채널별 리스트 또는 단일 값)
+        scale: Scale  (    )
+        offset: Offset  (    )
     
     Returns:
         DummyModel instance
@@ -125,13 +125,13 @@ if __name__ == "__main__":
         "-s", "--scale",
         type=str,
         default="200.0,10.0",
-        help="Scale 값 (채널별, 쉼표로 구분, 예: '200.0,10.0')",
+        help="Scale  (,  , : '200.0,10.0')",
     )
     parser.add_argument(
         "-o", "--offset",
         type=str,
         default="0.0,0.0",
-        help="Offset 값 (채널별, 쉼표로 구분, 예: '0.0,0.0')",
+        help="Offset  (,  , : '0.0,0.0')",
     )
     
     args = parser.parse_args()
