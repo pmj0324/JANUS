@@ -1,0 +1,61 @@
+model:
+  type: PmtC
+  options:
+    npmts: 4681
+    pmt_scale: true
+    dropout: 0.02
+    nout: 5
+    nblocks: 4
+    hidden_size: 16
+    classifier_size: 128
+    factor: 2
+    final_hidden_size: 256
+    final: tanh01
+    offset: [0., 0.]
+    scale: [1000., 8.]
+    label_offset: [0.0, 0.0, 0.0, 0.0, 0.0]
+    label_scale: [1.0, 1.0, 0.1, 0.0005, 0.0005]
+    time_mean: False
+    update_with_classifer: true
+angular: true
+training:
+  method: wbcosine
+  warmup: True
+  warmup_proportion: 3.0e-3
+  cycle: 2
+  nepochs: 20
+  bsz: 128
+  lr: 0.0003
+  loss: l1loss
+  transform:
+    - type: random_erasing
+      value: 0.0025
+  early_stopping: 10
+data:
+  loader: h5
+  train: train
+  num_workers: 3
+  shuffle: true
+  bin: 0,1,2,3,4,5,6,7,8,9,10
+  cut: (coreFiduScale<200)&(zenith<1.05)&(nhit>65)
+  vars:
+    x:
+      - maskpmt
+    label:
+      - method: Expr
+        param: sin(zenith)*cos(azimuth)
+      - method: Expr
+        param: sin(zenith)*sin(azimuth)
+      - logEnergy
+      - coreX
+      - coreY
+    coreFiduScale:
+      - coreFiduScale
+    bin:
+      - bin
+  files:
+    - file: /home/pmj0324/icecube-genesis/0121/GENESIS/GENESIS-data/22644_0921_time_shift.h5
+path: ./output/swgo/automaticRec/F1_GammaRec_Opt_wbcosine_LR_0.0003_NB_4_HS_16_CS_128_F_2_FHS_256
+device: cuda
+print_every: 50
+

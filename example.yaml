@@ -17,7 +17,20 @@ model:
     label_scale: [1.0, 1.0, 0.1, 0.0005, 0.0005]
     time_mean: False
     update_with_classifer: true
-angular: true
+
+diffusion:
+  schedule:
+    type: linear  # Options: linear, cosine, quadratic, sigmoid
+    beta_start: 0.0001
+    beta_end: 0.02
+    timesteps: 1000
+  objective: "eps"  # Options: eps, x0
+  use_cfg: true
+  cfg_scale: 2.0
+  cfg_dropout: 0.1
+
+
+
 training:
   method: wbcosine
   warmup: True
@@ -27,35 +40,21 @@ training:
   bsz: 128
   lr: 0.0003
   loss: l1loss
-  transform:
-    - type: random_erasing
-      value: 0.0025
   early_stopping: 10
+
+
 data:
-  loader: hdf5
-  train: train
-  num_workers: 3
+  loader: h5
+  h5_path: /home/pmj0324/icecube-genesis/0121/GENESIS/GENESIS-data/22644_0921_time_shift.h5
+  bsz : 128
   shuffle: true
-  bin: 0,1,2,3,4,5,6,7,8,9,10
-  cut: (coreFiduScale<200)&(zenith<1.05)&(nhit>65)
-  vars:
-    x:
-      - maskpmt
-    label:
-      - method: Expr
-        param: sin(zenith)*cos(azimuth)
-      - method: Expr
-        param: sin(zenith)*sin(azimuth)
-      - logEnergy
-      - coreX
-      - coreY
-    coreFiduScale:
-      - coreFiduScale
-    bin:
-      - bin
-  files:
-    - file: /store/hawc/swgo/ml/gammaF1v6.hdf5
-path: ./output/swgo/automaticRec/F1_GammaRec_Opt_wbcosine_LR_0.0003_NB_4_HS_16_CS_128_F_2_FHS_256
+  num_workers: 3
+  angle_conversion: true 
+  pin_memory: false
+
+
+
+path: ./output/
 device: cuda
 print_every: 50
 

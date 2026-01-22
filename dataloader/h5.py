@@ -17,7 +17,7 @@ class H5Dataset(Dataset):
     """
     PyTorch Dataset for the 22644_0921_time_shift.h5 file format.
 
-    Output per event:
+    Output per event (tuple):
       - sig:   Tensor float32 shape (2, L)   -> [npe, firstTime]
       - geo:   Tensor float32 shape (3, L)   -> [x, y, z]
       - label: Tensor float32 shape (6,)     -> [Energy, Zenith, Azimuth, X, Y, Z]
@@ -38,6 +38,9 @@ class H5Dataset(Dataset):
         y_key: str = "ypmt",
         z_key: str = "zpmt",
         preload_geometry: bool = True,
+        angle_conversion: bool = False,
+        num_workers: Optional[int] = None,
+        shuffle: Optional[bool] = None,
     ) -> None:
         super().__init__()
         self.h5_path = os.fspath(h5_path)
@@ -47,6 +50,9 @@ class H5Dataset(Dataset):
         self.y_key = y_key
         self.z_key = z_key
         self.preload_geometry = preload_geometry
+        self.angle_conversion = angle_conversion
+        self.num_workers = num_workers
+        self.shuffle = shuffle
 
         # Lazily opened file/datasets for worker safety.
         self._file: Optional[h5py.File] = None
@@ -91,18 +97,34 @@ class H5Dataset(Dataset):
         ).astype(np.float32, copy=False)
 
     # --- main API ---------------------------------------------------------
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def __getitem__(self, idx: int) -> tuple:
+        """
+        Returns:
+            tuple: (sig, geo, label)
+                - sig: Tensor float32 shape (2, L) -> [npe, firstTime]
+                - geo: Tensor float32 shape (3, L) -> [x, y, z]
+                - label: Tensor float32 shape (6,) -> [Energy, Zenith, Azimuth, X, Y, Z]
+        """
         self._ensure_open()
 
         sig_np = self._signal_ds[idx]  # shape (2, L)
         lbl_np = self._label_ds[idx]   # shape (6,)
         geo_np = self._get_geo()       # shape (3, L)
 
+        # Apply angle conversion if enabled
+        # label format: [Energy, Zenith, Azimuth, X, Y, Z]
+        if self.angle_conversion:
+            zenith = lbl_np[1]
+            azimuth = lbl_np[2]
+            lbl_np = lbl_np.copy()  # Avoid modifying original data
+            lbl_np[1] = np.sin(zenith) * np.cos(azimuth)  # zenith -> sin(zenith)*cos(azimuth)
+            lbl_np[2] = np.sin(zenith) * np.sin(azimuth)  # azimuth -> sin(zenith)*sin(azimuth)
+
         sig = torch.from_numpy(np.asarray(sig_np, dtype=np.float32))
         geo = torch.from_numpy(geo_np)
         label = torch.from_numpy(np.asarray(lbl_np, dtype=np.float32))
 
-        return {"sig": sig, "geo": geo, "label": label}
+        return (sig, geo, label)
 
 
 
