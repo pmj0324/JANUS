@@ -73,7 +73,8 @@ def minmax_normalize(
     feature_range=(0, 1), 
     normalize_all=False,
     channel_methods=None,
-    feature_ranges=None
+    feature_ranges=None,
+    offset=0,
 ):
     """Convenience decorator for minmax normalization."""
     return normalize(
@@ -82,35 +83,40 @@ def minmax_normalize(
         feature_range=feature_range, 
         normalize_all=normalize_all,
         channel_methods=channel_methods,
-        feature_ranges=feature_ranges
+        feature_ranges=feature_ranges,
+        offset=offset,
     )
 
 
 def zscore_normalize(
     arg_index=None, 
     normalize_all=False,
-    channel_methods=None
+    channel_methods=None,
+    offset=0,
 ):
     """Convenience decorator for zscore normalization."""
     return normalize(
         method='zscore', 
         arg_index=arg_index, 
         normalize_all=normalize_all,
-        channel_methods=channel_methods
+        channel_methods=channel_methods,
+        offset=offset,
     )
 
 
 def log_normalize(
     arg_index=None, 
     normalize_all=False,
-    channel_methods=None
+    channel_methods=None,
+    offset=0,
 ):
     """Convenience decorator for log(1+x) transformation."""
     return normalize(
         method='log', 
         arg_index=arg_index, 
         normalize_all=normalize_all,
-        channel_methods=channel_methods
+        channel_methods=channel_methods,
+        offset=offset,
     )
 
 
@@ -119,7 +125,8 @@ def log_minmax_normalize(
     feature_range=(0, 1), 
     normalize_all=False,
     channel_methods=None,
-    feature_ranges=None
+    feature_ranges=None,
+    offset=0,
 ):
     """Convenience decorator for log(1+x) + minmax normalization."""
     return normalize(
@@ -128,7 +135,8 @@ def log_minmax_normalize(
         feature_range=feature_range, 
         normalize_all=normalize_all,
         channel_methods=channel_methods,
-        feature_ranges=feature_ranges
+        feature_ranges=feature_ranges,
+        offset=offset,
     )
 
 

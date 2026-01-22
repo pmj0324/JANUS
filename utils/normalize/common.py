@@ -300,6 +300,16 @@ def _normalize_signal_channels(
         raise TypeError(f"Unsupported data type: {type(sig)}. Expected torch.Tensor or numpy.ndarray")
 
 
+def _apply_offset(data: Union[torch.Tensor, np.ndarray], offset: float, subtract: bool) -> Union[torch.Tensor, np.ndarray]:
+    """Apply offset to data (subtract or add). Preserves type (tensor/array)."""
+    if offset == 0:
+        return data
+    op = (lambda a, b: a - b) if subtract else (lambda a, b: a + b)
+    if is_tensor(data):
+        return op(data, offset)
+    return op(np.asarray(data), offset)
+
+
 def normalize(
     method: Optional[str] = None,
     channel_methods: Optional[Union[List[str], Dict[str, str]]] = None,
@@ -309,11 +319,12 @@ def normalize(
     normalize_all: bool = False,
     normalize_signal_channels: bool = False,
     denormalize: bool = False,
-    channel_stats: Optional[Union[List[dict], Dict[str, dict]]] = None
+    channel_stats: Optional[Union[List[dict], Dict[str, dict]]] = None,
+    offset: float = 0,
 ):
     """
     Decorator for automatic data normalization.
-    
+
     Args:
         method: Normalization method (used when channel_methods is None). Options:
             - 'minmax': Min-Max normalization to [feature_range[0], feature_range[1]]
@@ -342,7 +353,9 @@ def normalize(
                       List format: [{'min': npe_min, 'max': npe_max}, {'min': firstTime_min, 'max': firstTime_max}]
                       Dict format: {'npe': {'min': min, 'max': max}, 'firstTime': {'min': min, 'max': max}}
                       If None, statistics are computed from data automatically.
-    
+        offset: Value subtracted from data before normalization and added back after denormalization.
+               Default 0 (no shift).
+
     Returns:
         Decorator function
     
@@ -417,21 +430,22 @@ def normalize(
                 normalized_args = []
                 for arg in args:
                     if is_numeric_data(arg):
+                        arg_off = _apply_offset(arg, offset, subtract=True)
                         if normalize_signal_channels and channel_methods is not None:
                             # Check if this looks like a signal (B, 2, L) or (2, L)
-                            if (is_tensor(arg) and arg.dim() >= 2) or (is_array(arg) and arg.ndim >= 2):
-                                if (is_tensor(arg) and arg.shape[-2] == 2) or (is_array(arg) and arg.shape[-2] == 2):
-                                    normalized_args.append(_normalize_signal_channels(arg, channel_methods, feature_ranges))
+                            if (is_tensor(arg_off) and arg_off.dim() >= 2) or (is_array(arg_off) and arg_off.ndim >= 2):
+                                if (is_tensor(arg_off) and arg_off.shape[-2] == 2) or (is_array(arg_off) and arg_off.shape[-2] == 2):
+                                    normalized_args.append(_normalize_signal_channels(arg_off, channel_methods, feature_ranges))
                                 else:
                                     # Not a signal, use single method
                                     norm_func = get_normalization_function(method, feature_range)
-                                    normalized_args.append(norm_func(arg))
+                                    normalized_args.append(norm_func(arg_off))
                             else:
                                 norm_func = get_normalization_function(method, feature_range)
-                                normalized_args.append(norm_func(arg))
+                                normalized_args.append(norm_func(arg_off))
                         else:
                             norm_func = get_normalization_function(method, feature_range)
-                            normalized_args.append(norm_func(arg))
+                            normalized_args.append(norm_func(arg_off))
                     else:
                         normalized_args.append(arg)
                 args = tuple(normalized_args)
@@ -445,12 +459,13 @@ def normalize(
                 if target_index < len(args):
                     target_arg = args[target_index]
                     if is_numeric_data(target_arg):
+                        target_arg = _apply_offset(target_arg, offset, subtract=True)
                         if normalize_signal_channels and channel_methods is not None:
                             # Check if this looks like a signal (B, 2, L) or (2, L)
                             if (is_tensor(target_arg) and target_arg.dim() >= 2) or (is_array(target_arg) and target_arg.ndim >= 2):
                                 if (is_tensor(target_arg) and target_arg.shape[-2] == 2) or (is_array(target_arg) and target_arg.shape[-2] == 2):
-                                    # Store original data and stats for denormalization
-                                    original_target_arg = target_arg.clone() if is_tensor(target_arg) else target_arg.copy()
+                                    # Store original data and stats for denormalization (before offset)
+                                    original_target_arg = (args[target_index].clone() if is_tensor(args[target_index]) else args[target_index].copy())
                                     
                                     # Use provided channel_stats or compute from data
                                     if channel_stats is not None:
@@ -545,23 +560,29 @@ def normalize(
             result = func(*args, **kwargs)
             
             # Denormalize output if requested
+            did_denorm = False
             if denormalize and is_numeric_data(result):
                 if normalize_signal_channels and channel_methods is not None and computed_channel_stats is not None:
                     # Check if result looks like a signal (B, 2, L) or (2, L)
                     if (is_tensor(result) and result.dim() >= 2) or (is_array(result) and result.ndim >= 2):
                         if (is_tensor(result) and result.shape[-2] == 2) or (is_array(result) and result.shape[-2] == 2):
                             result = _denormalize_signal_channels(result, channel_methods, computed_channel_stats, feature_ranges)
+                            did_denorm = True
                         else:
                             # Not a signal, use single method
                             if norm_stats is not None:
                                 denorm_func = get_denormalization_function(method, norm_stats, feature_range)
                                 result = denorm_func(result)
+                                did_denorm = True
                 else:
                     # Single method denormalization
                     if norm_stats is not None:
                         denorm_func = get_denormalization_function(method, norm_stats, feature_range)
                         result = denorm_func(result)
-            
+                        did_denorm = True
+                if did_denorm:
+                    result = _apply_offset(result, offset, subtract=False)
+
             return result
         
         return wrapper
