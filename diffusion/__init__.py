@@ -5,7 +5,7 @@ Diffusion Module for GENESIS
 This module contains all diffusion-related components organized by functionality:
 - schedules/: Noise schedulers (linear, cosine, quadratic, sigmoid)
 - forward/: Forward diffusion process (adding noise)
-- gaussian_diffusion.py: Main diffusion model (DDPM, DDIM)
+- core.py: Main diffusion model (DDPM, DDIM)
 
 Visualization tools are in utils/vis/visualize_forward_diffusion.py
 
@@ -23,7 +23,7 @@ Usage:
     visualize_forward_diffusion(x0, geom, label, schedules, timesteps)
 """
 
-from .gaussian_diffusion import (
+from .core import (
     GaussianDiffusion,
     create_gaussian_diffusion
 )
