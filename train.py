@@ -133,9 +133,13 @@ if __name__ == '__main__':
     
     print(f"Creating noise schedule: {schedule_type}")
     print(f"  Timesteps: {timesteps}")
-    if schedule_type == "cosine":
+    if schedule_type == "linear":
+        print(f"  beta_start: {schedule_config['beta_start']}, beta_end: {schedule_config['beta_end']}")
+    elif schedule_type == "cosine":
         print(f"  Parameter s: {schedule_config['s']}")
-    else:
+    elif schedule_type == "quadratic":
+        print(f"  beta_start: {schedule_config['beta_start']}, beta_end: {schedule_config['beta_end']}")
+    elif schedule_type == "sigmoid":
         print(f"  beta_start: {schedule_config['beta_start']}, beta_end: {schedule_config['beta_end']}")
     print(f"  Beta schedule shape: {betas.shape}, range: [{betas.min():.6f}, {betas.max():.6f}]")
     
