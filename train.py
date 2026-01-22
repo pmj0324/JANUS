@@ -7,6 +7,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-c", "--config", type=str, required=True)
 args = parser.parse_args()
 
+# Bring the config file
 config = yaml.load(open(args.config, "r"), Loader=yaml.FullLoader)
 
 # Create dataset based on loader type
@@ -33,9 +34,12 @@ data_loader = th.utils.data.DataLoader(
 
 for batch in data_loader:
     sig, geo, label = batch
-    print(f"Signal shape: {sig.shape}")      # (B, 2, L)
+    print(f"Signal shape: {sig.shape}")     # (B, 2, L)
+    print(f"Signal : sig[0] = {sig[0]}")
     print(f"Geometry shape: {geo.shape}")    # (B, 3, L)
+    print(f"Geometry : geo[0] = {geo[0]}")
     print(f"Label shape: {label.shape}")     # (B, 6)
+    print(f"Label : label[0] = {label[0]}")
     break
 
 print("Done")

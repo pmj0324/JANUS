@@ -46,10 +46,10 @@ training:
 data:
   loader: h5
   h5_path: /home/pmj0324/icecube-genesis/0121/GENESIS/GENESIS-data/22644_0921_time_shift.h5
-  bsz : 128
+  bsz : 1
   shuffle: true
   num_workers: 3
-  angle_conversion: true 
+  angle_conversion: false
   pin_memory: false
 
 
