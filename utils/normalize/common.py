@@ -10,6 +10,7 @@ Includes decorator logic and type checking utilities.
 from __future__ import annotations
 from functools import wraps
 from typing import Callable, Union, Optional, Tuple, Dict, List
+import inspect
 import torch
 import numpy as np
 
@@ -310,6 +311,43 @@ def _apply_offset(data: Union[torch.Tensor, np.ndarray], offset: float, subtract
     return op(np.asarray(data), offset)
 
 
+def _apply_channel_offsets(
+    sig: Union[torch.Tensor, np.ndarray],
+    offsets: List[float],
+    subtract: bool,
+) -> Union[torch.Tensor, np.ndarray]:
+    """Apply per-channel offset to signal (B, 2, L) or (2, L). offsets = [npe_offset, firstTime_offset]."""
+    o0, o1 = offsets[0], offsets[1]
+    if (o0 == 0 and o1 == 0):
+        return sig
+    op = (lambda a, b: a - b) if subtract else (lambda a, b: a + b)
+    if is_tensor(sig):
+        out = sig.clone()
+        if sig.dim() == 3:
+            if o0 != 0:
+                out[:, 0, :] = op(out[:, 0, :], o0)
+            if o1 != 0:
+                out[:, 1, :] = op(out[:, 1, :], o1)
+        else:
+            if o0 != 0:
+                out[0, :] = op(out[0, :], o0)
+            if o1 != 0:
+                out[1, :] = op(out[1, :], o1)
+        return out
+    out = np.asarray(sig).copy()
+    if out.ndim == 3:
+        if o0 != 0:
+            out[:, 0, :] = op(out[:, 0, :], o0)
+        if o1 != 0:
+            out[:, 1, :] = op(out[:, 1, :], o1)
+    else:
+        if o0 != 0:
+            out[0, :] = op(out[0, :], o0)
+        if o1 != 0:
+            out[1, :] = op(out[1, :], o1)
+    return out
+
+
 def normalize(
     method: Optional[str] = None,
     channel_methods: Optional[Union[List[str], Dict[str, str]]] = None,
@@ -320,7 +358,7 @@ def normalize(
     normalize_signal_channels: bool = False,
     denormalize: bool = False,
     channel_stats: Optional[Union[List[dict], Dict[str, dict]]] = None,
-    offset: float = 0,
+    offset: Union[float, List[float], Dict[str, float]] = 0,
 ):
     """
     Decorator for automatic data normalization.
@@ -353,8 +391,10 @@ def normalize(
                       List format: [{'min': npe_min, 'max': npe_max}, {'min': firstTime_min, 'max': firstTime_max}]
                       Dict format: {'npe': {'min': min, 'max': max}, 'firstTime': {'min': min, 'max': max}}
                       If None, statistics are computed from data automatically.
-        offset: Value subtracted from data before normalization and added back after denormalization.
-               Default 0 (no shift).
+        offset: Value(s) subtracted before normalization and added back after denormalization. Default 0.
+               - float: same offset for all (or single-arg case).
+               - List [npe_offset, firstTime_offset]: per-channel when using channel_methods.
+               - Dict {'npe': npe_offset, 'firstTime': firstTime_offset}: same as list.
 
     Returns:
         Decorator function
@@ -455,17 +495,31 @@ def normalize(
                     target_index = 0
                 else:
                     target_index = arg_index
-                
+
+                # Support both positional args and keyword args.
+                # If the user passes the target argument by keyword (common in codebase),
+                # args may not contain it, so we resolve the parameter name from signature.
+                target_kw_name = None
+                target_arg = None
                 if target_index < len(args):
                     target_arg = args[target_index]
-                    if is_numeric_data(target_arg):
+                else:
+                    param_names = list(inspect.signature(func).parameters.keys())
+                    if target_index < len(param_names):
+                        maybe_name = param_names[target_index]
+                        if maybe_name in kwargs:
+                            target_kw_name = maybe_name
+                            target_arg = kwargs[maybe_name]
+
+                if target_arg is not None and is_numeric_data(target_arg):
+                        # Store original data and stats for denormalization (before offset)
+                        original_unoffset = (target_arg.clone() if is_tensor(target_arg) else target_arg.copy())
                         target_arg = _apply_offset(target_arg, offset, subtract=True)
                         if normalize_signal_channels and channel_methods is not None:
                             # Check if this looks like a signal (B, 2, L) or (2, L)
                             if (is_tensor(target_arg) and target_arg.dim() >= 2) or (is_array(target_arg) and target_arg.ndim >= 2):
                                 if (is_tensor(target_arg) and target_arg.shape[-2] == 2) or (is_array(target_arg) and target_arg.shape[-2] == 2):
-                                    # Store original data and stats for denormalization (before offset)
-                                    original_target_arg = (args[target_index].clone() if is_tensor(args[target_index]) else args[target_index].copy())
+                                    original_target_arg = original_unoffset
                                     
                                     # Use provided channel_stats or compute from data
                                     if channel_stats is not None:
@@ -530,31 +584,46 @@ def normalize(
                                         channel_maxs=[npe_max, firstTime_max] if npe_max is not None else None
                                     )
                                     
-                                    # Store stats as function attribute for access inside function
-                                    # Store on the original function object, not wrapper
+                                    # Store stats as function attribute for access inside function.
+                                    # Some code references the decorated function name (wrapper) to read these,
+                                    # so store on BOTH the original function and the wrapper.
                                     func._normalization_stats = computed_channel_stats
                                     func._original_data = original_target_arg
-                                    
-                                    args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
+                                    wrapper._normalization_stats = computed_channel_stats
+                                    wrapper._original_data = original_target_arg
+
+                                    if target_kw_name is None:
+                                        args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
+                                    else:
+                                        kwargs[target_kw_name] = normalized_arg
                                 else:
                                     # Not a signal, use single method
                                     if denormalize:
                                         norm_stats = _compute_normalization_stats(target_arg, method)
                                     norm_func = get_normalization_function(method, feature_range)
                                     normalized_arg = norm_func(target_arg)
-                                    args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
+                                    if target_kw_name is None:
+                                        args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
+                                    else:
+                                        kwargs[target_kw_name] = normalized_arg
                             else:
                                 if denormalize:
                                     norm_stats = _compute_normalization_stats(target_arg, method)
                                 norm_func = get_normalization_function(method, feature_range)
                                 normalized_arg = norm_func(target_arg)
-                                args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
+                                if target_kw_name is None:
+                                    args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
+                                else:
+                                    kwargs[target_kw_name] = normalized_arg
                         else:
                             if denormalize:
                                 norm_stats = _compute_normalization_stats(target_arg, method)
                             norm_func = get_normalization_function(method, feature_range)
                             normalized_arg = norm_func(target_arg)
-                            args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
+                            if target_kw_name is None:
+                                args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
+                            else:
+                                kwargs[target_kw_name] = normalized_arg
             
             # Call original function with normalized arguments
             result = func(*args, **kwargs)

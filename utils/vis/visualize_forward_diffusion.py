@@ -35,25 +35,27 @@ def plot_histograms(
     output_path: Path,
     t_val: int,
     schedule_name: str = "",
-    title_suffix: str = ""
+    title_suffix: str = "",
+    is_denormalized: bool = False,
 ):
     """
     Create histogram plots for nPE and firstTime.
     
     X-axis range is set to be centered at 0 for better visualization of Gaussian distribution at final timestep.
-    Data remains in [0, 1] range (no transformation).
+    Data is plotted as-is (no transformation).
     
     Args:
-        npe_data: NPE values (L,) - normalized [0, 1]
-        ftime_data: firstTime values (L,) - normalized [0, 1]
+        npe_data: NPE values (L,) - either normalized or denormalized, depending on caller
+        ftime_data: firstTime values (L,) - either normalized or denormalized, depending on caller
         output_path: Output directory path
         t_val: Timestep value
         schedule_name: Name of the noise schedule
         title_suffix: Additional title suffix
+        is_denormalized: If True, label axes in original units; otherwise label as normalized
     """
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     
-    # NPE histogram - use data as is [0, 1]
+    # NPE histogram - use data as-is
     npe_valid = npe_data[np.isfinite(npe_data)]
     if len(npe_valid) > 0:
         # Calculate x-axis range to fit all data with padding, centered at 0
@@ -67,7 +69,7 @@ def plot_histograms(
         x_range = max(x_range, 0.5)
         
         ax1.hist(npe_valid, bins=50, alpha=0.7, color='blue', edgecolor='black')
-        ax1.set_xlabel('NPE (normalized)')
+        ax1.set_xlabel('NPE' if is_denormalized else 'NPE (normalized)')
         ax1.set_ylabel('Count')
         title = f'NPE Distribution t={t_val}'
         if schedule_name:
@@ -88,7 +90,7 @@ def plot_histograms(
         ax1.axvline(mean_npe - std_npe, color='orange', linestyle='--', alpha=0.7)
         ax1.legend()
     
-    # firstTime histogram - use data as is [0, 1]
+    # firstTime histogram - use data as-is
     ftime_valid = ftime_data[np.isfinite(ftime_data)]
     if len(ftime_valid) > 0:
         # Calculate x-axis range to fit all data with padding, centered at 0
@@ -102,7 +104,7 @@ def plot_histograms(
         x_range = max(x_range, 0.5)
         
         ax2.hist(ftime_valid, bins=50, alpha=0.7, color='green', edgecolor='black')
-        ax2.set_xlabel('FirstTime (normalized)')
+        ax2.set_xlabel('FirstTime (ns)' if is_denormalized else 'FirstTime (normalized)')
         ax2.set_ylabel('Count')
         title = f'FirstTime Distribution t={t_val}'
         if schedule_name:
@@ -129,7 +131,6 @@ def plot_histograms(
     hist_filename = f"histogram_t{t_val}"
     if schedule_name:
         hist_filename += f"_{schedule_name}"
-    hist_filename += title_suffix.lower().replace(' ', '_')
     hist_path = output_path / f"{hist_filename}.png"
     fig.savefig(hist_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -144,7 +145,8 @@ def plot_histograms(
     channel_stats=[
         {'log_min': 0.0, 'log_max': np.log1p(225.0)},      # npe: log(1+0)=0, log(1+225)
         {'log_min': 0.0, 'log_max': np.log1p(20676.0)}     # firstTime: log(1+0)=0, log(1+20676)
-    ]
+    ],
+    offset=0,  # no offset applied before normalization
 )
 def visualize_forward_diffusion(
     x0_sig: torch.Tensor,
@@ -156,6 +158,7 @@ def visualize_forward_diffusion(
     detector_csv: Optional[str] = None,
     save_3d: bool = True,
     save_histograms: bool = True,
+    denormalize: bool = False,
     denormalize_fn: Optional[callable] = None,
 ):
     """
@@ -165,7 +168,7 @@ def visualize_forward_diffusion(
     - npe channel (x0_sig[:, 0, :]): log_minmax normalization [0, 1] using fixed min=0, max=225
     - firstTime channel (x0_sig[:, 1, :]): log_minmax normalization [0, 1] using fixed min=0, max=20676
     
-    Forward diffusion uses normalized data [0, 1], visualization denormalizes back to original scale.
+    Forward diffusion uses normalized data [0, 1]. Visualization can optionally denormalize back to original scale.
     
     Args:
         x0_sig: Clean signals (B, 2, L) - automatically normalized by decorator
@@ -179,6 +182,8 @@ def visualize_forward_diffusion(
         detector_csv: Path to detector geometry CSV
         save_3d: Whether to save 3D plots
         save_histograms: Whether to save histograms
+        denormalize: If True, denormalize signals back to original scale for visualization.
+            Default is False (visualize normalized values).
         denormalize_fn: Optional function to denormalize signals (deprecated, auto-denormalize is used)
             Should take (sig_norm, ...) and return sig_raw
     """
@@ -238,6 +243,7 @@ def visualize_forward_diffusion(
     print(f"Timesteps to visualize: {timesteps}")
     print(f"Schedules: {[s[0] for s in schedules]}")
     print(f"Output directory: {output_path}")
+    print(f"Visualization mode: {'denormalized' if denormalize else 'normalized'}")
     
     # Process each schedule
     for schedule_name, schedule_kwargs in schedules:
@@ -273,38 +279,48 @@ def visualize_forward_diffusion(
             # Convert to numpy
             x_t_np = x_t[0].cpu().numpy()  # (2, L) - normalized [0, 1]
             
-            # Denormalize for visualization (back to original scale)
-            # Forward diffusion uses normalized data, but visualization shows original scale
-            if npe_stats is not None and firstTime_stats is not None:
-                from utils.normalize import denormalize_log_minmax
-                x_t_vis = x_t_np.copy()
-                # Denormalize npe channel: [0, 1] -> log scale -> original scale
-                x_t_vis[0, :] = denormalize_log_minmax(
-                    torch.from_numpy(x_t_np[0, :]),
-                    npe_stats.get('log_min', 0.0),
-                    npe_stats.get('log_max', np.log1p(225.0)),
-                    feature_range=(0, 1)
-                ).numpy()
-                # Denormalize firstTime channel: [0, 1] -> log scale -> original scale
-                x_t_vis[1, :] = denormalize_log_minmax(
-                    torch.from_numpy(x_t_np[1, :]),
-                    firstTime_stats.get('log_min', 0.0),
-                    firstTime_stats.get('log_max', np.log1p(20676.0)),
-                    feature_range=(0, 1)
-                ).numpy()
+            # Optionally denormalize for visualization (back to original scale)
+            if denormalize:
+                # Forward diffusion gradually pushes values outside [0, 1] (Gaussian-like).
+                # Directly inverting log_minmax for out-of-range values can explode (exp),
+                # so we clamp to the valid normalization range for visualization.
+                x_t_np_clip = np.clip(x_t_np, 0.0, 1.0)
+                if denormalize_fn is not None:
+                    # Deprecated: allow caller-provided denormalization
+                    x_t_vis = denormalize_fn(x_t_np_clip)
+                elif npe_stats is not None and firstTime_stats is not None:
+                    from utils.normalize import denormalize_log_minmax
+                    x_t_vis = x_t_np_clip.copy()
+                    # Denormalize npe channel: [0, 1] -> log scale -> original scale
+                    x_t_vis[0, :] = denormalize_log_minmax(
+                        torch.from_numpy(x_t_np_clip[0, :]),
+                        npe_stats.get('log_min', 0.0),
+                        npe_stats.get('log_max', np.log1p(225.0)),
+                        feature_range=(0, 1)
+                    ).numpy()
+                    # Denormalize firstTime channel: [0, 1] -> log scale -> original scale
+                    x_t_vis[1, :] = denormalize_log_minmax(
+                        torch.from_numpy(x_t_np_clip[1, :]),
+                        firstTime_stats.get('log_min', 0.0),
+                        firstTime_stats.get('log_max', np.log1p(20676.0)),
+                        feature_range=(0, 1)
+                    ).numpy()
+                else:
+                    # Fallback: use normalized values if stats not available
+                    x_t_vis = x_t_np_clip.copy()
             else:
-                # Fallback: use normalized values if stats not available
                 x_t_vis = x_t_np.copy()
             
-            # Extract nPE and firstTime (denormalized to original scale)
-            npe = x_t_vis[0]  # (L,) - denormalized to original scale
-            ftime = x_t_vis[1]  # (L,) - denormalized to original scale
+            # Extract nPE and firstTime (either normalized or denormalized)
+            npe = x_t_vis[0]  # (L,)
+            ftime = x_t_vis[1]  # (L,)
             
             # Sanitize firstTime
             ftime = np.nan_to_num(ftime, nan=0.0, posinf=0.0, neginf=0.0)
             
             # Create signal array for visualization (2, L)
             sig_vis = np.stack([npe, ftime], axis=0)
+            mode_title_suffix = " (denormalized)" if denormalize else " (normalized)"
             
             # Save 3D plot
             if save_3d:
@@ -319,7 +335,11 @@ def visualize_forward_diffusion(
                         marker_size=20.0,
                         show_detector_hull=True,
                         show=False,
-                        title_prefix=f"t={t_val} ({schedule_name}) - "
+                        title_prefix=f"Time Step={t_val}, Scheduler={schedule_name}",
+                        firsttime_title="FirstTime" if denormalize else "FirstTime (normalized)",
+                        npe_title="NPE" if denormalize else "NPE (normalized)",
+                        firsttime_cbar_label="FirstTime (ns)" if denormalize else "FirstTime (normalized)",
+                        npe_cbar_label="NPE" if denormalize else "NPE (normalized)",
                     )
                     print(f"     3D plot saved: {png_path}")
                 except Exception as e:
@@ -334,6 +354,8 @@ def visualize_forward_diffusion(
                         output_path=schedule_output,
                         t_val=t_val,
                         schedule_name=schedule_name,
+                        title_suffix=mode_title_suffix,
+                        is_denormalized=denormalize,
                     )
                     print(f"     Histogram saved: {hist_path}")
                 except Exception as e:

@@ -304,6 +304,12 @@ def main():
         action="store_true",
         help="Don't save histograms"
     )
+
+    parser.add_argument(
+        "--denormalize",
+        action="store_true",
+        help="Visualize in original (denormalized) units. Default is to visualize normalized values.",
+    )
     
     args = parser.parse_args()
     
@@ -355,10 +361,11 @@ def main():
     print(f"   Save 3D plots: {not args.no_3d}")
     print(f"   Save histograms: {not args.no_histograms}")
     print(f"   Output directory: {args.output_dir}")
+    print(f"   Visualize denormalized: {args.denormalize}")
     print(f"   Note: Signal normalization handled by visualize_forward_diffusion decorator")
     
     # Visualize
-    # denormalize_fn은 None으로 설정 (데코레이터가 자동으로 역정규화함)
+    # denormalize는 visualize_forward_diffusion 내부 옵션으로 제어합니다.
     visualize_forward_diffusion(
         x0_sig=x_sig,
         geom=geom,
@@ -369,7 +376,8 @@ def main():
         detector_csv=args.detector_csv,
         save_3d=not args.no_3d,
         save_histograms=not args.no_histograms,
-        denormalize_fn=None,  # 데코레이터가 자동으로 역정규화하므로 None
+        denormalize=args.denormalize,
+        denormalize_fn=None,
     )
     
     print("\n" + "="*80)

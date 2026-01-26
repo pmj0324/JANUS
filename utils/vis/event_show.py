@@ -129,8 +129,8 @@ def show_event_from_npz(
     ax = fig.add_subplot(111, projection="3d")
     
     # Title
-    title_line1 = f"{title_prefix}Energy = {energy:.3f}"
-    title_line2 = f"Zenith = {zenith:.3f}, Azimuth = {azimuth:.3f}"
+    title_line1 = f"{title_prefix}"
+    title_line2 = f"Energy = {energy:.3f}, Zenith = {zenith:.3f}, Azimuth = {azimuth:.3f}"
     title_line3 = f"Position = ({x_pos:.2f}, {y_pos:.2f}, {z_pos:.2f})"
     fig.suptitle(f"{title_line1}\n{title_line2}\n{title_line3}", fontsize=14, y=0.98)
     
@@ -176,8 +176,22 @@ def _find_project_root() -> Path:
     return current
 
 
-def _draw_detector_hull(ax: plt.Axes, x: np.ndarray, y: np.ndarray, z: np.ndarray):
-    """Draw detector hull outline."""
+def _draw_detector_hull(
+    ax: plt.Axes,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    *,
+    alpha: float = 0.25,
+    linewidth: float = 1.5,
+):
+    """Draw detector hull outline.
+
+    Notes:
+    - We approximate the IceCube-like outer boundary using a small set of "edge strings".
+    - We explicitly *close* the top/bottom polygons (last -> first) to avoid missing edges.
+    - We also draw vertical edges between top and bottom.
+    """
     # Simplified detector hull (IceCube-like)
     edge_string_idx = [1, 6, 50, 74, 73, 78, 75, 31]
     top_xy, bottom_xy = [], []
@@ -189,12 +203,45 @@ def _draw_detector_hull(ax: plt.Axes, x: np.ndarray, y: np.ndarray, z: np.ndarra
             bottom_xy.append([x[(i - 1) * 60 + 59], y[(i - 1) * 60 + 59]])
     
     if top_xy and bottom_xy:
-        top_xy = np.array(top_xy)
-        bottom_xy = np.array(bottom_xy)
-        
-        # Draw top and bottom outlines
-        ax.plot(top_xy[:, 0], top_xy[:, 1], z.max(), 'k-', linewidth=2, alpha=0.7)
-        ax.plot(bottom_xy[:, 0], bottom_xy[:, 1], z.min(), 'k-', linewidth=2, alpha=0.7)
+        top_xy = np.asarray(top_xy, dtype=np.float32)
+        bottom_xy = np.asarray(bottom_xy, dtype=np.float32)
+
+        z_top = float(np.nanmax(z))
+        z_bottom = float(np.nanmin(z))
+
+        # Close the polygons (avoid missing last->first edge)
+        if top_xy.shape[0] >= 2:
+            top_closed = np.vstack([top_xy, top_xy[0]])
+            bottom_closed = np.vstack([bottom_xy, bottom_xy[0]])
+
+            ax.plot(
+                top_closed[:, 0],
+                top_closed[:, 1],
+                np.full(top_closed.shape[0], z_top, dtype=np.float32),
+                color="black",
+                linewidth=linewidth,
+                alpha=alpha,
+            )
+            ax.plot(
+                bottom_closed[:, 0],
+                bottom_closed[:, 1],
+                np.full(bottom_closed.shape[0], z_bottom, dtype=np.float32),
+                color="black",
+                linewidth=linewidth,
+                alpha=alpha,
+            )
+
+        # Vertical edges
+        if top_xy.shape[0] == bottom_xy.shape[0]:
+            for (tx, ty), (bx, by) in zip(top_xy, bottom_xy):
+                ax.plot(
+                    [tx, bx],
+                    [ty, by],
+                    [z_top, z_bottom],
+                    color="black",
+                    linewidth=max(1.0, linewidth * 0.8),
+                    alpha=alpha,
+                )
 
 
 def _draw_pmt_spheres(
@@ -297,6 +344,12 @@ def show_event_dual_plot(
     Returns:
         (fig, (ax1, ax2)): matplotlib Figure and tuple of two Axes3D objects
     """
+    # Optional labels/titles (kept in kwargs for backward compatibility)
+    firsttime_title = kwargs.pop("firsttime_title", "FirstTime")
+    npe_title = kwargs.pop("npe_title", "NPE")
+    firsttime_cbar_label = kwargs.pop("firsttime_cbar_label", "FirstTime (ns)")
+    npe_cbar_label = kwargs.pop("npe_cbar_label", "NPE")
+
     # Validate input shapes
     if sig.shape[0] != 2:
         raise ValueError(f"sig must have shape (2, L), got {sig.shape}")
@@ -332,8 +385,8 @@ def show_event_dual_plot(
     zenith_deg = np.degrees(zenith)  # rad to degrees
     azimuth_deg = np.degrees(azimuth)  # rad to degrees
     
-    title_line1 = f"{title_prefix}Energy = {energy_pev:.3f} PeV"
-    title_line2 = f"Zenith = {zenith_deg:.3f}°, Azimuth = {azimuth_deg:.3f}°"
+    title_line1 = f"{title_prefix}"
+    title_line2 = f"Energy = {energy_pev:.3f} PeV, Zenith = {zenith_deg:.3f}°, Azimuth = {azimuth_deg:.3f}°"
     title_line3 = f"Vertex Position (m) = ({x_pos:.2f}, {y_pos:.2f}, {z_pos:.2f})"
     fig.suptitle(f"{title_line1}\n{title_line2}\n{title_line3}", fontsize=14, y=0.98)
     
@@ -361,6 +414,7 @@ def show_event_dual_plot(
             vmax_ftime = vmin_ftime + 1.0
         
         norm_ftime = Normalize(vmin=vmin_ftime, vmax=vmax_ftime)
+        # Use the same colormap for both channels for consistency
         cmap_ftime = colormaps["jet"]
         
         # Scatter plot with colored markers
@@ -371,13 +425,13 @@ def show_event_dual_plot(
         
         # Colorbar for firstTime
         cbar1 = fig.colorbar(scatter1, ax=ax1, shrink=0.5, aspect=20, pad=0.15)
-        cbar1.set_label('FirstTime (ns)', rotation=270, labelpad=20)
+        cbar1.set_label(firsttime_cbar_label, rotation=270, labelpad=20)
     
-    ax1.set_title('FirstTime', fontsize=12)
+    ax1.set_title(firsttime_title, fontsize=12)
     _style_axes(ax1)
     
     # Right plot: npe
-    nonzero_npe_mask = (npe > 0) & np.isfinite(npe)
+    nonzero_npe_mask = (npe != 0) & np.isfinite(npe)
     if nonzero_npe_mask.any():
         x_npe = x[nonzero_npe_mask]
         y_npe = y[nonzero_npe_mask]
@@ -391,7 +445,8 @@ def show_event_dual_plot(
             vmax_npe = vmin_npe + 1.0
         
         norm_npe = Normalize(vmin=vmin_npe, vmax=vmax_npe)
-        cmap_npe = colormaps["viridis"]
+        # Use the same colormap for both channels for consistency
+        cmap_npe = colormaps["jet"]
         
         # Scatter plot with colored markers
         scatter2 = ax2.scatter(x_npe, y_npe, z_npe,
@@ -401,9 +456,9 @@ def show_event_dual_plot(
         
         # Colorbar for npe
         cbar2 = fig.colorbar(scatter2, ax=ax2, shrink=0.5, aspect=20, pad=0.15)
-        cbar2.set_label('NPE', rotation=270, labelpad=20)
+        cbar2.set_label(npe_cbar_label, rotation=270, labelpad=20)
     
-    ax2.set_title('NPE', fontsize=12)
+    ax2.set_title(npe_title, fontsize=12)
     _style_axes(ax2)
     
     # Save if requested
