@@ -62,7 +62,12 @@ from .common import (
 )
 
 # Import individual normalization functions
-from .minmax import apply_minmax, denormalize_minmax
+from .minmax import (
+    apply_minmax,
+    denormalize_minmax,
+    apply_minmax_geo,
+    denormalize_minmax_geo,
+)
 from .zscore import apply_zscore, denormalize_zscore
 from .log import apply_log_transform, denormalize_log
 from .log_minmax import apply_log_minmax, denormalize_log_minmax
@@ -146,12 +151,14 @@ __all__ = [
     
     # Individual normalization functions
     'apply_minmax',
+    'apply_minmax_geo',
     'apply_zscore',
     'apply_log_transform',
     'apply_log_minmax',
     
     # Individual denormalization functions
     'denormalize_minmax',
+    'denormalize_minmax_geo',
     'denormalize_zscore',
     'denormalize_log',
     'denormalize_log_minmax',

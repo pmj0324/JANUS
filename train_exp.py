@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
 from dataloader.h5 import H5Dataset
 from diffusion.schedules import sigmoid_beta_schedule
 from diffusion.forward import apply_forward_diffusion
-from utils.normalize import normalize, denormalize_log_minmax
+from utils.normalize import normalize, denormalize_log_minmax, apply_minmax_geo
 from utils.vis.event_show import show_event_dual_plot
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -47,18 +47,28 @@ ftime_log_max = float(np.log1p(ftime_clip))
 _feature_range = (-1, 1)
 
 # label 정규화: [Energy, ux, uy, X, Y, Z] -> Energy log_minmax, ux/uy identity, X/Y/Z minmax (dataset min/max)
-energy_clip_pev = 100.0
-energy_log_max = float(np.log1p(energy_clip_pev))
 _label_methods = ["log_minmax", "identity", "identity", "minmax", "minmax", "minmax"]
 _label_feature_ranges = [_feature_range] * 6
+# Energy (PeV) min/max: 하드코딩 → log_minmax용 log_min, log_max 계산
+_ENERGY_PEV_MINMAX = {"min": 1.0, "max": 100.0}
+energy_log_min = float(np.log1p(_ENERGY_PEV_MINMAX["min"]))
+energy_log_max = float(np.log1p(_ENERGY_PEV_MINMAX["max"]))
 # X,Y,Z min/max: 22644_0921_time_shift.h5 전체 데이터셋 기준 (하드코딩)
 _LABEL_XYZ_MINMAX = [
     {"min": -570.9000244140625, "max": 576.3699951171875},   # X
     {"min": -521.0800170898438, "max": 509.5},               # Y
     {"min": -509.8599853515625, "max": 506.0566711425781},   # Z
 ]
+# Geo (xpmt, ypmt, zpmt) min/max: 동일 H5 기준 하드코딩
+_GEO_XYZ_MINMAX = [
+    {"min": -570.9000244140625, "max": 576.3699951171875},   # x
+    {"min": -521.0800170898438, "max": 509.5},               # y
+    {"min": -509.8599853515625, "max": 506.0566711425781},   # z
+]
+geo_min = np.array([_GEO_XYZ_MINMAX[j]["min"] for j in range(3)], dtype=np.float32)
+geo_max = np.array([_GEO_XYZ_MINMAX[j]["max"] for j in range(3)], dtype=np.float32)
 _label_stats = [
-    {"log_min": log_min, "log_max": energy_log_max},
+    {"log_min": energy_log_min, "log_max": energy_log_max},
     {},
     {},
     _LABEL_XYZ_MINMAX[0],
@@ -104,6 +114,8 @@ sig0, geo0, label0 = dataset[0]
 print("sig:", sig0.shape, sig0.dtype)
 print("geo:", geo0.shape, geo0.dtype)
 print("label:", label0.shape, label0.dtype, label0)
+print("geo_min (x,y,z):", geo_min)
+print("geo_max (x,y,z):", geo_max)
 
 # ---- normalization: decorator-wrapped prepare_batch (normalize_sig 동일 방식) ----
 # normalize_sig: clamp npe [0, npe_clip], ftime [0, ftime_clip]; then log_minmax per channel
@@ -333,8 +345,9 @@ class DiffusionDiTTransformer(nn.Module):
         return out.permute(0, 2, 1)                             # (B, 2, L)
 
 
-# Fixed geo from first sample (model uses single geometry for all samples)
-_geo = dataset[0][1]  # (3, L)
+# Fixed geo from first sample, minmax-normalized with H5 min/max (model uses single geometry for all samples)
+_geo_raw = dataset[0][1]  # (3, L)
+_geo = apply_minmax_geo(_geo_raw, geo_min, geo_max, feature_range=(0, 1))
 model = DiffusionDiTTransformer(geo=_geo, d_model=256, nhead=8, depth=6, mlp_ratio=4.0, dropout=0.0, label_dim=6).to(device)
 optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
