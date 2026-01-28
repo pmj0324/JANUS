@@ -143,6 +143,12 @@ if __name__ == '__main__':
         print(f"  beta_start: {schedule_config['beta_start']}, beta_end: {schedule_config['beta_end']}")
     print(f"  Beta schedule shape: {betas.shape}, range: [{betas.min():.6f}, {betas.max():.6f}]")
     
+    # Compute alpha_bar (alphas_cumprod) for information
+    alphas = 1.0 - betas
+    alphas_cumprod = th.cumprod(alphas, dim=0)
+    alpha_bar_T = alphas_cumprod[-1].item()  # Last timestep T
+    print(f"  Alpha_bar at T={timesteps}: {alpha_bar_T:.10f}")
+    
     # Setup device
     device = th.device(config.get("device", "cuda" if th.cuda.is_available() else "cpu"))
     betas = betas.to(device)
