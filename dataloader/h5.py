@@ -20,9 +20,10 @@ class H5Dataset(Dataset):
     Output per event (tuple):
       - sig:   Tensor float32 shape (2, L)   -> [npe, firstTime]
       - geo:   Tensor float32 shape (3, L)   -> [x, y, z]
-      - label: Tensor float32 shape (6,)     -> [Energy, Zenith, Azimuth, X, Y, Z]
+      - label: Tensor float32 shape (6,)     -> [Energy (PeV), Zenith, Azimuth, X, Y, Z]
 
     Notes:
+      - Raw HDF5 energy is in MeV; if energy_in_pev=True (default), label[0] is converted to PeV.
       - Geometry (x/y/z) is static; it can be preloaded into memory (default) to
         avoid repeated disk reads.
       - HDF5 handles are re-opened lazily in each worker process to remain
@@ -38,7 +39,8 @@ class H5Dataset(Dataset):
         y_key: str = "ypmt",
         z_key: str = "zpmt",
         preload_geometry: bool = True,
-        angle_conversion: bool = False,
+        angle_conversion: bool = True,
+        energy_in_pev: bool = True,
         num_workers: Optional[int] = None,
         shuffle: Optional[bool] = None,
     ) -> None:
@@ -51,6 +53,7 @@ class H5Dataset(Dataset):
         self.z_key = z_key
         self.preload_geometry = preload_geometry
         self.angle_conversion = angle_conversion
+        self.energy_in_pev = energy_in_pev
         self.num_workers = num_workers
         self.shuffle = shuffle
 
@@ -103,7 +106,7 @@ class H5Dataset(Dataset):
             tuple: (sig, geo, label)
                 - sig: Tensor float32 shape (2, L) -> [npe, firstTime]
                 - geo: Tensor float32 shape (3, L) -> [x, y, z]
-                - label: Tensor float32 shape (6,) -> [Energy, Zenith, Azimuth, X, Y, Z]
+                - label: Tensor float32 shape (6,) -> [Energy (PeV if energy_in_pev), Zenith, Azimuth, X, Y, Z]
         """
         self._ensure_open()
 
@@ -111,12 +114,15 @@ class H5Dataset(Dataset):
         lbl_np = self._label_ds[idx]   # shape (6,)
         geo_np = self._get_geo()       # shape (3, L)
 
-        # Apply angle conversion if enabled
         # label format: [Energy, Zenith, Azimuth, X, Y, Z]
+        if self.energy_in_pev or self.angle_conversion:
+            lbl_np = lbl_np.copy()
+        if self.energy_in_pev:
+            lbl_np[0] = lbl_np[0] / 1e6  # MeV -> PeV
+
         if self.angle_conversion:
             zenith = lbl_np[1]
             azimuth = lbl_np[2]
-            lbl_np = lbl_np.copy()  # Avoid modifying original data
             lbl_np[1] = np.sin(zenith) * np.cos(azimuth)  # zenith -> sin(zenith)*cos(azimuth)
             lbl_np[2] = np.sin(zenith) * np.sin(azimuth)  # azimuth -> sin(zenith)*sin(azimuth)
 

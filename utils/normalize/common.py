@@ -60,8 +60,10 @@ def get_normalization_function(
     elif method == 'log_minmax':
         from .log_minmax import apply_log_minmax
         return lambda x: apply_log_minmax(x, feature_range, data_min=data_min, data_max=data_max)
+    elif method == 'identity':
+        return lambda x: (x.clone() if is_tensor(x) else np.asarray(x, copy=True))
     else:
-        raise ValueError(f"Unknown normalization method: {method}. Choose from: minmax, zscore, log, log_minmax")
+        raise ValueError(f"Unknown normalization method: {method}. Choose from: minmax, zscore, log, log_minmax, identity")
 
 
 def get_denormalization_function(method: str, stats: dict, feature_range: Tuple[float, float] = (0, 1)):
@@ -88,8 +90,10 @@ def get_denormalization_function(method: str, stats: dict, feature_range: Tuple[
     elif method == 'log_minmax':
         from .log_minmax import denormalize_log_minmax
         return lambda x: denormalize_log_minmax(x, stats['log_min'], stats['log_max'], feature_range)
+    elif method == 'identity':
+        return lambda x: (x.clone() if is_tensor(x) else np.asarray(x, copy=True))
     else:
-        raise ValueError(f"Unknown normalization method: {method}. Choose from: minmax, zscore, log, log_minmax")
+        raise ValueError(f"Unknown normalization method: {method}. Choose from: minmax, zscore, log, log_minmax, identity")
 
 
 def _compute_normalization_stats(data: Union[torch.Tensor, np.ndarray], method: str) -> dict:
@@ -301,6 +305,66 @@ def _normalize_signal_channels(
         raise TypeError(f"Unsupported data type: {type(sig)}. Expected torch.Tensor or numpy.ndarray")
 
 
+def _normalize_label_columns(
+    label: Union[torch.Tensor, np.ndarray],
+    label_methods: List[str],
+    label_feature_ranges: Optional[List[Tuple[float, float]]] = None,
+    label_stats: Optional[List[dict]] = None,
+) -> Union[torch.Tensor, np.ndarray]:
+    """
+    Normalize label (B, 6) or (6,) per column. label_methods[i] for column i.
+    Options: minmax, zscore, log, log_minmax, identity.
+    """
+    n = 6
+    if len(label_methods) < n:
+        label_methods = label_methods + [label_methods[-1]] * (n - len(label_methods))
+    if label_feature_ranges is None:
+        label_feature_ranges = [(0, 1)] * n
+    elif len(label_feature_ranges) < n:
+        label_feature_ranges = list(label_feature_ranges) + [(0, 1)] * (n - len(label_feature_ranges))
+    if label_stats is not None and len(label_stats) < n:
+        label_stats = list(label_stats) + [{}] * (n - len(label_stats))
+
+    def _make_func(jj):
+        m = label_methods[jj]
+        if m == 'identity':
+            return lambda x: (x.clone() if is_tensor(x) else np.asarray(x, copy=True))
+        fr = label_feature_ranges[jj]
+        st = (label_stats[jj] if jj < len(label_stats) else None) if label_stats else None
+        data_min = data_max = None
+        if st:
+            if m == 'log_minmax':
+                data_min = st.get('log_min')
+                data_max = st.get('log_max')
+            else:
+                data_min = st.get('min')
+                data_max = st.get('max')
+        return get_normalization_function(m, fr, data_min=data_min, data_max=data_max)
+
+    funcs = [_make_func(j) for j in range(n)]
+
+    if is_tensor(label):
+        out = label.clone()
+        if label.dim() == 2:  # (B, 6)
+            for j in range(n):
+                out[:, j] = funcs[j](label[:, j])
+        else:  # (6,)
+            for j in range(n):
+                out[j] = funcs[j](label[j])
+        return out
+    elif is_array(label):
+        out = label.copy()
+        if label.ndim == 2:
+            for j in range(n):
+                out[:, j] = np.asarray(funcs[j](label[:, j]))
+        else:
+            for j in range(n):
+                out[j] = np.asarray(funcs[j](label[j]))
+        return out
+    else:
+        raise TypeError(f"Unsupported type: {type(label)}")
+
+
 def _apply_offset(data: Union[torch.Tensor, np.ndarray], offset: float, subtract: bool) -> Union[torch.Tensor, np.ndarray]:
     """Apply offset to data (subtract or add). Preserves type (tensor/array)."""
     if offset == 0:
@@ -359,6 +423,10 @@ def normalize(
     denormalize: bool = False,
     channel_stats: Optional[Union[List[dict], Dict[str, dict]]] = None,
     offset: Union[float, List[float], Dict[str, float]] = 0,
+    label_arg_index: int = 1,
+    label_methods: Optional[List[str]] = None,
+    label_feature_ranges: Optional[List[Tuple[float, float]]] = None,
+    label_stats: Optional[List[dict]] = None,
 ):
     """
     Decorator for automatic data normalization.
@@ -395,6 +463,11 @@ def normalize(
                - float: same offset for all (or single-arg case).
                - List [npe_offset, firstTime_offset]: per-channel when using channel_methods.
                - Dict {'npe': npe_offset, 'firstTime': firstTime_offset}: same as list.
+        label_arg_index: Index of the label argument (B, 6) or (6,). Default 1.
+        label_methods: Per-column methods for label [Energy, ux, uy, X, Y, Z]. Length 6.
+                      Options: minmax, zscore, log, log_minmax, identity.
+        label_feature_ranges: Per-column feature ranges for label. Length 6. Default (0,1) each.
+        label_stats: Per-column stats for label. E.g. [{'log_min':0,'log_max':v}, {}, ...]. Identity uses {}.
 
     Returns:
         Decorator function
@@ -441,8 +514,8 @@ def normalize(
     elif method is None:
         method = 'minmax'  # default
     
-    # Validate methods
-    valid_methods = ['minmax', 'zscore', 'log', 'log_minmax']
+    # Validate methods (identity allowed for label_methods only)
+    valid_methods = ['minmax', 'zscore', 'log', 'log_minmax', 'identity']
     
     if channel_methods is not None:
         if isinstance(channel_methods, list):
@@ -455,6 +528,11 @@ def normalize(
                     raise ValueError(f"Unknown normalization method: {m}. Choose from {valid_methods}")
     elif method not in valid_methods:
         raise ValueError(f"Unknown normalization method: {method}. Choose from {valid_methods}")
+    
+    if label_methods is not None:
+        for m in label_methods:
+            if m not in valid_methods:
+                raise ValueError(f"Unknown label method: {m}. Choose from: {valid_methods}")
     
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -624,6 +702,27 @@ def normalize(
                                 args = args[:target_index] + (normalized_arg,) + args[target_index + 1:]
                             else:
                                 kwargs[target_kw_name] = normalized_arg
+            
+            # Optionally normalize label (B, 6) with label_methods per column
+            if label_methods is not None:
+                li = label_arg_index
+                label_kw_name = None
+                label_arg = None
+                if li < len(args):
+                    label_arg = args[li]
+                else:
+                    pnames = list(inspect.signature(func).parameters.keys())
+                    if li < len(pnames) and pnames[li] in kwargs:
+                        label_kw_name = pnames[li]
+                        label_arg = kwargs[label_kw_name]
+                if label_arg is not None and is_numeric_data(label_arg):
+                    label_norm = _normalize_label_columns(
+                        label_arg, label_methods, label_feature_ranges, label_stats
+                    )
+                    if label_kw_name is None:
+                        args = args[:li] + (label_norm,) + args[li + 1:]
+                    else:
+                        kwargs[label_kw_name] = label_norm
             
             # Call original function with normalized arguments
             result = func(*args, **kwargs)

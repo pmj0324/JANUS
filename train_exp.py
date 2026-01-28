@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
 from dataloader.h5 import H5Dataset
 from diffusion.schedules import sigmoid_beta_schedule
 from diffusion.forward import apply_forward_diffusion
-from utils.normalize import apply_log_minmax
+from utils.normalize import normalize, denormalize_log_minmax
 from utils.vis.event_show import show_event_dual_plot
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,58 +31,125 @@ print("device:", device)
 T = 1000
 beta_start, beta_end = 1e-4, 2e-2  # sigmoid schedule params
 
-batch_size = 16
-num_workers = 6  # 노트북에서는 0 추천
+batch_size = 1
+num_workers = 0  # 노트북에서는 0 추천
 lr = 3e-4
 steps = 500
 print_every = 25
 
-# 데이터/정규화: log1p 후 [-1, 1] minmax
+# 데이터/정규화 (normalize_sig 방식): clamp 후 log1p + minmax to [-1, 1]
 npe_clip = 1000.0
 ftime_clip = 8.0
 log_min = 0.0
 npe_log_max = float(np.log1p(npe_clip))
 ftime_log_max = float(np.log1p(ftime_clip))
+_feature_range = (-1, 1)
+
+# label 정규화: [Energy, ux, uy, X, Y, Z] -> Energy log_minmax, ux/uy identity, X/Y/Z minmax (dataset min/max)
+energy_clip_pev = 100.0
+energy_log_max = float(np.log1p(energy_clip_pev))
+_label_methods = ["log_minmax", "identity", "identity", "minmax", "minmax", "minmax"]
+_label_feature_ranges = [_feature_range] * 6
+# X,Y,Z min/max: 22644_0921_time_shift.h5 전체 데이터셋 기준 (하드코딩)
+_LABEL_XYZ_MINMAX = [
+    {"min": -570.9000244140625, "max": 576.3699951171875},   # X
+    {"min": -521.0800170898438, "max": 509.5},               # Y
+    {"min": -509.8599853515625, "max": 506.0566711425781},   # Z
+]
+_label_stats = [
+    {"log_min": log_min, "log_max": energy_log_max},
+    {},
+    {},
+    _LABEL_XYZ_MINMAX[0],
+    _LABEL_XYZ_MINMAX[1],
+    _LABEL_XYZ_MINMAX[2],
+]
+
+LABEL_NAMES = ["Energy (PeV)", "ux", "uy", "X", "Y", "Z"]
+
+
+def _print_label_normalize_config():
+    """Label별 정규화 설정 출력."""
+    print("label normalize (per column):")
+    for j, name in enumerate(LABEL_NAMES):
+        m = _label_methods[j]
+        fr = _label_feature_ranges[j]
+        st = _label_stats[j] if _label_stats and j < len(_label_stats) else {}
+        if m == "identity":
+            detail = "identity (no transform)"
+        elif m == "log_minmax":
+            detail = f"log_minmax -> {fr}  stats={st}"
+        elif m == "minmax":
+            if st and "min" in st and "max" in st:
+                detail = f"minmax -> {fr}  stats={st} (dataset min/max)"
+            else:
+                detail = f"minmax -> {fr}  stats={st} (empty => batch min/max)"
+        else:
+            detail = f"{m} -> {fr}  stats={st}"
+        print(f"  [{j}] {name}: {detail}")
+
 
 # h5 자동 탐색
-h5_path = None
-for p in [
-    "GENESIS/GENESIS-data/22644_0921_time_shift.h5",
-    "./GENESIS-data/22644_0921_time_shift.h5",
-    "../GENESIS-data/22644_0921_time_shift.h5",
-]:
-    if os.path.exists(p):
-        h5_path = p
-        break
-
-if h5_path is None:
-    raise FileNotFoundError("H5 파일을 찾지 못했습니다. h5_path 후보를 추가하거나 직접 지정해주세요.")
-
-print("h5_path:", h5_path)
+h5_path = "/Users/monocerotis/0121/git0121/GENESIS/GENESIS-data/22644_0921_time_shift.h5"
 
 # ---- dataset / dataloader ----
 dataset = H5Dataset(h5_path=h5_path)
+_print_label_normalize_config()
+
 loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
 
 print("dataset length:", len(dataset))
 sig0, geo0, label0 = dataset[0]
 print("sig:", sig0.shape, sig0.dtype)
 print("geo:", geo0.shape, geo0.dtype)
-print("label:", label0.shape, label0.dtype)
+print("label:", label0.shape, label0.dtype, label0)
 
-# ---- normalization helpers ----
+# ---- normalization: decorator-wrapped prepare_batch (normalize_sig 동일 방식) ----
+# normalize_sig: clamp npe [0, npe_clip], ftime [0, ftime_clip]; then log_minmax per channel
+#   data_min=log_min, data_max=npe_log_max / ftime_log_max, feature_range=(-1, 1)
+_channel_stats = [
+    {"log_min": log_min, "log_max": npe_log_max},
+    {"log_min": log_min, "log_max": ftime_log_max},
+]
 
-def normalize_sig(sig: torch.Tensor) -> torch.Tensor:
-    """sig: (B, 2, L) -> normalized to [-1, 1]"""
-    sig = sig.clone()
-    # clamp to avoid weird values
-    sig[:, 0] = torch.clamp(sig[:, 0], min=0.0, max=npe_clip)
-    sig[:, 1] = torch.clamp(sig[:, 1], min=0.0, max=ftime_clip)
+@normalize(
+    channel_methods=["log_minmax", "log_minmax"],
+    feature_ranges=[_feature_range, _feature_range],
+    channel_stats=_channel_stats,
+    arg_index=0,
+    label_arg_index=1,
+    label_methods=_label_methods,
+    label_feature_ranges=_label_feature_ranges,
+    label_stats=_label_stats,
+)
+def prepare_batch(
+    sig: torch.Tensor, label: torch.Tensor, *, verbose: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """입력: (sig, label). 데코레이터가 sig는 [-1,1] log_minmax, label은 Energy log_minmax / ux,uy identity / X,Y,Z minmax.
+    출력: (sig_norm, label_norm). verbose=True면 print."""
+    if verbose:
+        print("prepare_batch: label", label)
+    return (sig, label)
 
-    # apply_log_minmax expects (log space) data_min/max
-    sig[:, 0] = apply_log_minmax(sig[:, 0], feature_range=(-1, 1), data_min=log_min, data_max=npe_log_max)
-    sig[:, 1] = apply_log_minmax(sig[:, 1], feature_range=(-1, 1), data_min=log_min, data_max=ftime_log_max)
-    return sig
+
+def _clamp_sig(sig: torch.Tensor) -> torch.Tensor:
+    """Clamp npe/ftime before normalize (normalize_sig와 동일). Returns clamped copy."""
+    s = sig.clone()
+    s[:, 0] = torch.clamp(s[:, 0], min=0.0, max=npe_clip)
+    s[:, 1] = torch.clamp(s[:, 1], min=0.0, max=ftime_clip)
+    return s
+
+
+def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
+    """정규화된 sig ([-1, 1] log_minmax)를 원 스케일로 역정규화. prepare_batch 출력용."""
+    out = sig.clone()
+    if sig.dim() == 3:
+        out[:, 0, :] = denormalize_log_minmax(sig[:, 0, :], log_min, npe_log_max, _feature_range)
+        out[:, 1, :] = denormalize_log_minmax(sig[:, 1, :], log_min, ftime_log_max, _feature_range)
+    else:
+        out[0, :] = denormalize_log_minmax(sig[0, :], log_min, npe_log_max, _feature_range)
+        out[1, :] = denormalize_log_minmax(sig[1, :], log_min, ftime_log_max, _feature_range)
+    return out
 
 
 def sample_timesteps(batch: int, T: int, device: torch.device) -> torch.Tensor:
@@ -193,7 +260,15 @@ for step in range(1, steps + 1):
     sig = sig.to(device)         # (B, 2, L)
     label = label.to(device)     # (B, 6)
 
-    x0 = normalize_sig(sig)      # (B, 2, L) in [-1, 1]
+    sig_clamp = _clamp_sig(sig)
+    if step == 1:
+        _label_raw_before = label.clone()
+    x0, label = prepare_batch(sig_clamp, label, verbose=(step == 1))  # (B, 2, L) in [-1, 1]
+    if step == 1:
+        print("prepare_batch: label (raw, same batch)", _label_raw_before)
+        for j in [1, 2]:
+            ok = torch.allclose(_label_raw_before[:, j], label[:, j])
+            print(f"  identity col {j} ({LABEL_NAMES[j]}): {'OK' if ok else 'MISMATCH'} raw={_label_raw_before[0, j].item():.6f} norm={label[0, j].item():.6f}")
 
     B = x0.shape[0]
     t = sample_timesteps(B, T, device)
@@ -228,16 +303,18 @@ label_np = label_raw.detach().cpu().numpy()
 sig = sig_raw.unsqueeze(0).to(device)  # (1,2,L)
 label = label_raw.unsqueeze(0).to(device)  # (1,6)
 
-x0 = normalize_sig(sig)
+sig_clamp = _clamp_sig(sig)
+x0, label = prepare_batch(sig_clamp, label, verbose=True)
 
-for t_val in [0, 250, 500, 750, 999]:
+for t_val in [0, 250, 500, 750, 1000]:
     t = torch.tensor([t_val], device=device, dtype=torch.long)
     noise = torch.randn_like(x0)
     x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
-    sig_t = x_t[0].detach().cpu().numpy()
+    # 출력 역정규화 후 시각화 (prepare_batch 출력용 denormalize_sig)
+    x_t_denorm = denormalize_sig(x_t)[0].detach().cpu().numpy()
 
     fig, _ = show_event_dual_plot(
-        sig=sig_t,
+        sig=x_t_denorm,
         geo=geo_np,
         label=label_np,
         figure_size=(18, 8),
@@ -245,7 +322,7 @@ for t_val in [0, 250, 500, 750, 999]:
         show_detector_hull=True,
         show=False,
         title_prefix=f"train_exp.py | Sigmoid schedule | event {event_idx} | t={t_val}",
-        firsttime_title="FirstTime (x_t)",
-        npe_title="nPE (x_t)",
+        firsttime_title="FirstTime (x_t, denorm)",
+        npe_title="nPE (x_t, denorm)",
     )
     plt.show()
