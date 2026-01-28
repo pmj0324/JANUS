@@ -4,6 +4,7 @@ Training script for GENESIS diffusion model.
 Converted from train.ipynb
 """
 
+import math
 import os
 import sys
 from pathlib import Path
@@ -160,38 +161,116 @@ def sample_timesteps(batch: int, T: int, device: torch.device) -> torch.Tensor:
 betas = sigmoid_beta_schedule(timesteps=T, beta_start=beta_start, beta_end=beta_end).to(device)
 print("betas:", betas.shape, betas.min().item(), betas.max().item())
 
-# ---- Transformer (DiT-like baseline): token=DOM, conditional on t + label ----
+# ---- Transformer (DiT-style): token=DOM, conditional on t + label ----
 
-def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
-    """t: (B,) -> (B, dim)"""
+def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
+    """
+    t: (B,) int/float
+    return: (B, dim)
+    """
+    if t.dim() != 1:
+        t = t.view(-1)
+    t = t.float()
+
     half = dim // 2
     freqs = torch.exp(
-        -np.log(10000.0) * torch.arange(0, half, device=t.device, dtype=torch.float32) / half
-    )
-    args = t.float().unsqueeze(1) * freqs.unsqueeze(0)
-    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=1)
+        -math.log(max_period) * torch.arange(0, half, device=t.device, dtype=torch.float32) / half
+    )  # (half,)
+    args = t[:, None] * freqs[None, :]  # (B, half)
+    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)  # (B, 2*half)
     if dim % 2 == 1:
-        emb = F.pad(emb, (0, 1))
+        emb = torch.cat([emb, torch.zeros((emb.shape[0], 1), device=t.device, dtype=emb.dtype)], dim=-1)
     return emb
 
 
-class DiffusionTransformer(nn.Module):
+class DiTBlock(nn.Module):
+    """
+    DiT-style Transformer block with AdaLN modulation from conditioning vector c.
+    x: (B, L, d)
+    c: (B, d)
+    """
+    def __init__(self, d: int, nhead: int, mlp_ratio: float = 4.0, dropout: float = 0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d, elementwise_affine=False)
+        self.attn = nn.MultiheadAttention(d, nhead, dropout=dropout, batch_first=True)
+
+        self.norm2 = nn.LayerNorm(d, elementwise_affine=False)
+        hidden = int(d * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(d, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, d),
+        )
+
+        # cond -> (shift1, scale1, gate1, shift2, scale2, gate2)
+        self.ada = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(d, 6 * d),
+        )
+
+    def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        B, L, d = x.shape
+        params = self.ada(c).view(B, 6, d)
+        shift1, scale1, gate1, shift2, scale2, gate2 = params[:, 0], params[:, 1], params[:, 2], params[:, 3], params[:, 4], params[:, 5]
+
+        # Attention
+        x1 = self.norm1(x)
+        x1 = x1 * (1.0 + scale1[:, None, :]) + shift1[:, None, :]
+        attn_out, _ = self.attn(x1, x1, x1, need_weights=False)
+        x = x + gate1[:, None, :] * attn_out
+
+        # MLP
+        x2 = self.norm2(x)
+        x2 = x2 * (1.0 + scale2[:, None, :]) + shift2[:, None, :]
+        mlp_out = self.mlp(x2)
+        x = x + gate2[:, None, :] * mlp_out
+
+        return x
+
+
+class DiffusionDiTTransformer(nn.Module):
     def __init__(
         self,
+        geo: torch.Tensor,          # (3, 5160) or (1, 3, 5160)
         d_model: int = 256,
         nhead: int = 8,
-        num_layers: int = 6,
-        dim_feedforward: int = 1024,
-        dropout: float = 0.1,
+        depth: int = 6,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.0,
         label_dim: int = 6,
     ):
         super().__init__()
         self.d_model = d_model
 
-        # (B, 2, L) -> tokens (B, L, d)
+        # ---- geo buffer (고정) ----
+        # geo: (3, L) -> (1, L, 3)
+        if geo.dim() == 2:
+            geo_tok = geo.transpose(0, 1).unsqueeze(0)  # (1, L, 3)
+        elif geo.dim() == 3:
+            # (1, 3, L) -> (1, L, 3)
+            geo_tok = geo.permute(0, 2, 1)
+        else:
+            raise ValueError(f"geo must be (3,L) or (1,3,L). got {geo.shape}")
+
+        self.register_buffer("geo_tokens", geo_tok.contiguous(), persistent=True)
+        L = self.geo_tokens.shape[1]
+        self.L = L
+
+        # ---- input embedding: (B, L, 2) -> (B, L, d) ----
         self.in_proj = nn.Linear(2, d_model)
 
-        # time + label conditioning -> (B, d)
+        # ---- geo positional embedding: (1, L, 3) -> (1, L, d) ----
+        self.geo_mlp = nn.Sequential(
+            nn.Linear(3, d_model * 2),
+            nn.SiLU(),
+            nn.Linear(d_model * 2, d_model),
+        )
+
+        self.use_index_pos = False
+        if self.use_index_pos:
+            self.index_pos = nn.Parameter(torch.zeros(1, L, d_model))
+
+        # ---- conditioning: time + label -> (B, d) ----
         self.time_mlp = nn.Sequential(
             nn.Linear(d_model, d_model * 4),
             nn.SiLU(),
@@ -203,17 +282,18 @@ class DiffusionTransformer(nn.Module):
             nn.Linear(d_model * 4, d_model),
         )
 
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-            activation="gelu",
-            norm_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        # ---- DiT blocks ----
+        self.blocks = nn.ModuleList([
+            DiTBlock(d_model, nhead, mlp_ratio=mlp_ratio, dropout=dropout)
+            for _ in range(depth)
+        ])
 
+        # ---- final layer (DiT 스타일로 마지막에도 cond로 LN modulation) ----
+        self.final_norm = nn.LayerNorm(d_model, elementwise_affine=False)
+        self.final_ada = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(d_model, 2 * d_model),  # shift, scale
+        )
         self.out_proj = nn.Linear(d_model, 2)
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
@@ -221,25 +301,41 @@ class DiffusionTransformer(nn.Module):
         x_t: (B, 2, L)
         t: (B,)
         label: (B, 6)
-        return eps_hat: (B, 2, L)
+        return: eps_hat (B, 2, L)
         """
         B, C, L = x_t.shape
-        # tokens: (B, L, 2)
+        assert L == self.L, f"Expected L={self.L}, got L={L}"
+
+        # (B, 2, L) -> (B, L, 2)
         tokens = x_t.permute(0, 2, 1)
         h = self.in_proj(tokens)  # (B, L, d)
 
-        t_emb = sinusoidal_timestep_embedding(t, self.d_model)
-        t_cond = self.time_mlp(t_emb)  # (B, d)
-        y_cond = self.label_mlp(label)  # (B, d)
-        cond = (t_cond + y_cond).unsqueeze(1)  # (B, 1, d)
+        # geo positional embedding
+        pos_geo = self.geo_mlp(self.geo_tokens)  # (1, L, d)
+        h = h + pos_geo
 
-        h = h + cond
-        h = self.encoder(h)
-        out = self.out_proj(h)  # (B, L, 2)
-        return out.permute(0, 2, 1)  # (B, 2, L)
+        if self.use_index_pos:
+            h = h + self.index_pos
+
+        # conditioning
+        t_emb = sinusoidal_timestep_embedding(t, self.d_model)  # (B, d)
+        c = self.time_mlp(t_emb) + self.label_mlp(label)        # (B, d)
+
+        # DiT blocks
+        for blk in self.blocks:
+            h = blk(h, c)
+
+        # final AdaLN + output
+        shift, scale = self.final_ada(c).chunk(2, dim=-1)       # (B,d), (B,d)
+        h = self.final_norm(h)
+        h = h * (1.0 + scale[:, None, :]) + shift[:, None, :]
+        out = self.out_proj(h)                                   # (B, L, 2)
+        return out.permute(0, 2, 1)                             # (B, 2, L)
 
 
-model = DiffusionTransformer().to(device)
+# Fixed geo from first sample (model uses single geometry for all samples)
+_geo = dataset[0][1]  # (3, L)
+model = DiffusionDiTTransformer(geo=_geo, d_model=256, nhead=8, depth=6, mlp_ratio=4.0, dropout=0.0, label_dim=6).to(device)
 optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
 print("params:", sum(p.numel() for p in model.parameters())/1e6, "M")
