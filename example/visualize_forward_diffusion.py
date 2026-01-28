@@ -245,7 +245,7 @@ def main():
         "-t", "--timesteps",
         type=int,
         nargs="+",
-        default=[0, 100, 500, 999],
+        default=[0, 100, 500, 1000],
         help="Timesteps to visualize (must include 0 and final timestep)"
     )
     
@@ -333,11 +333,11 @@ def main():
     if timesteps[0] != 0:
         print("  Warning: Adding t=0 to timesteps (original data)")
         timesteps.insert(0, 0)
-    if timesteps[-1] >= timesteps_total:
-        print(f"  Warning: Clamping timesteps to max {timesteps_total-1}")
-        timesteps = [t for t in timesteps if t < timesteps_total]
-        if timesteps[-1] != timesteps_total - 1:
-            timesteps.append(timesteps_total - 1)
+    if timesteps[-1] > timesteps_total:
+        print(f"  Warning: Clamping timesteps to max {timesteps_total}")
+        timesteps = [t for t in timesteps if t <= timesteps_total]
+        if timesteps[-1] != timesteps_total:
+            timesteps.append(timesteps_total)
     
     # Prepare schedules
     schedules = []
