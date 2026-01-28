@@ -349,6 +349,11 @@ def show_event_dual_plot(
     npe_title = kwargs.pop("npe_title", "NPE")
     firsttime_cbar_label = kwargs.pop("firsttime_cbar_label", "FirstTime (ns)")
     npe_cbar_label = kwargs.pop("npe_cbar_label", "NPE")
+    # Optional fixed color range (None = use data min/max)
+    firsttime_vmin = kwargs.pop("firsttime_vmin", None)
+    firsttime_vmax = kwargs.pop("firsttime_vmax", None)
+    npe_vmin = kwargs.pop("npe_vmin", None)
+    npe_vmax = kwargs.pop("npe_vmax", None)
 
     # Validate input shapes
     if sig.shape[0] != 2:
@@ -407,11 +412,14 @@ def show_event_dual_plot(
         z_ftime = z[nonzero_ftime_mask]
         ftime_vals = ftime[nonzero_ftime_mask]
         
-        # Color scale for firstTime
-        vmin_ftime = float(np.min(ftime_vals))
-        vmax_ftime = float(np.max(ftime_vals))
-        if vmin_ftime == vmax_ftime:
-            vmax_ftime = vmin_ftime + 1.0
+        # Color scale for firstTime (fixed range if provided)
+        if firsttime_vmin is not None and firsttime_vmax is not None:
+            vmin_ftime, vmax_ftime = firsttime_vmin, firsttime_vmax
+        else:
+            vmin_ftime = float(np.min(ftime_vals))
+            vmax_ftime = float(np.max(ftime_vals))
+            if vmin_ftime == vmax_ftime:
+                vmax_ftime = vmin_ftime + 1.0
         
         norm_ftime = Normalize(vmin=vmin_ftime, vmax=vmax_ftime)
         # Use the same colormap for both channels for consistency
@@ -438,11 +446,14 @@ def show_event_dual_plot(
         z_npe = z[nonzero_npe_mask]
         npe_vals = npe[nonzero_npe_mask]
         
-        # Color scale for npe
-        vmin_npe = float(np.min(npe_vals))
-        vmax_npe = float(np.max(npe_vals))
-        if vmin_npe == vmax_npe:
-            vmax_npe = vmin_npe + 1.0
+        # Color scale for npe (fixed range if provided)
+        if npe_vmin is not None and npe_vmax is not None:
+            vmin_npe, vmax_npe = npe_vmin, npe_vmax
+        else:
+            vmin_npe = float(np.min(npe_vals))
+            vmax_npe = float(np.max(npe_vals))
+            if vmin_npe == vmax_npe:
+                vmax_npe = vmin_npe + 1.0
         
         norm_npe = Normalize(vmin=vmin_npe, vmax=vmax_npe)
         # Use the same colormap for both channels for consistency
