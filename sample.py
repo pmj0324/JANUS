@@ -18,6 +18,7 @@ try:
 except ImportError:
     from torch.cuda.amp import GradScaler
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 # Add GENESIS to path
 sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
@@ -312,6 +313,60 @@ def load_model(checkpoint_path: str, device: torch.device):
     return model, betas, alphas, alphas_cumprod, T, dataset
 
 
+def plot_histogram(sig: np.ndarray, output_path: Path, title_suffix: str = ""):
+    """
+    nPE와 FirstTime의 히스토그램을 그려서 저장.
+    
+    Args:
+        sig: (2, L) 형태의 샘플 데이터
+        output_path: 저장 경로
+        title_suffix: 제목에 추가할 접미사
+    """
+    npe = sig[0]  # nPE 채널
+    ftime = sig[1]  # FirstTime 채널
+    
+    # 0이 아닌 값만 필터링 (히스토그램에 의미있는 데이터만)
+    npe_nonzero = npe[npe > 0]
+    ftime_nonzero = ftime[ftime > 0]
+    
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # nPE 히스토그램
+    ax1 = axes[0]
+    if len(npe_nonzero) > 0:
+        ax1.hist(npe_nonzero, bins=50, alpha=0.7, color='blue', edgecolor='black')
+        ax1.set_xlabel('nPE')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title(f'nPE Distribution{title_suffix}')
+        ax1.grid(True, alpha=0.3)
+        ax1.axvline(npe_nonzero.mean(), color='red', linestyle='--', label=f'Mean: {npe_nonzero.mean():.2f}')
+        ax1.axvline(np.median(npe_nonzero), color='green', linestyle='--', label=f'Median: {np.median(npe_nonzero):.2f}')
+        ax1.legend()
+    else:
+        ax1.text(0.5, 0.5, 'No non-zero nPE values', ha='center', va='center', transform=ax1.transAxes)
+        ax1.set_title(f'nPE Distribution{title_suffix} (empty)')
+    
+    # FirstTime 히스토그램
+    ax2 = axes[1]
+    if len(ftime_nonzero) > 0:
+        ax2.hist(ftime_nonzero, bins=50, alpha=0.7, color='orange', edgecolor='black')
+        ax2.set_xlabel('FirstTime')
+        ax2.set_ylabel('Frequency')
+        ax2.set_title(f'FirstTime Distribution{title_suffix}')
+        ax2.grid(True, alpha=0.3)
+        ax2.axvline(ftime_nonzero.mean(), color='red', linestyle='--', label=f'Mean: {ftime_nonzero.mean():.2f}')
+        ax2.axvline(np.median(ftime_nonzero), color='green', linestyle='--', label=f'Median: {np.median(ftime_nonzero):.2f}')
+        ax2.legend()
+    else:
+        ax2.text(0.5, 0.5, 'No non-zero FirstTime values', ha='center', va='center', transform=ax2.transAxes)
+        ax2.set_title(f'FirstTime Distribution{title_suffix} (empty)')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved histogram: {output_path}")
+
+
 def sample(
     model: nn.Module,
     label: torch.Tensor,
@@ -326,6 +381,7 @@ def sample(
     ref_idx: int = 0,
     geo_np: np.ndarray = None,
     label_np: np.ndarray = None,
+    save_histogram: bool = False,
 ):
     """DDPM 역확산을 통한 샘플링."""
     if device is None:
@@ -380,8 +436,8 @@ def sample(
             pbar.set_postfix({"t": t_val, "mean": f"{x.mean().item():.4f}", "std": f"{x.std().item():.4f}"})
     
     # 샘플 역정규화
-    samples_denorm = denormalize_sig(x)
-    sample_np = samples_denorm[0].detach().cpu().numpy()
+    samples_denorm = denormalize_sig(x)  # (B, 2, L)
+    samples_np = samples_denorm.detach().cpu().numpy()  # (B, 2, L)
     
     # GPU 메모리 정리
     del x, samples_denorm, label_norm
@@ -389,39 +445,52 @@ def sample(
         torch.cuda.empty_cache()
     
     print("Sampling completed!")
-    print(f"Sample shape: {sample_np.shape}")
-    print(f"Sample nPE range: [{sample_np[0].min():.2f}, {sample_np[0].max():.2f}]")
-    print(f"Sample FirstTime range: [{sample_np[1].min():.2f}, {sample_np[1].max():.2f}]")
+    print(f"Generated {num_samples} sample(s)")
     
-    # 시각화 및 저장
-    if output_dir:
-        # numpy 배열 저장
-        np_output_path = output_dir / f"sampled_event_{ref_idx}.npy"
-        np.save(np_output_path, sample_np)
-        print(f"Sample numpy array saved to: {np_output_path}")
+    # 각 샘플 저장
+    saved_samples = []
+    for i in range(num_samples):
+        sample_np = samples_np[i]  # (2, L)
         
-        # 이미지 저장 (geo와 label이 있을 때만)
-        if geo_np is not None and label_np is not None:
-            img_output_path = output_dir / f"sampled_event_{ref_idx}.png"
-            print(f"Plotting sampled data...")
-            fig_sampled, _ = show_event_dual_plot(
-                sig=sample_np,
-                geo=geo_np,
-                label=label_np,
-                output_path=str(img_output_path),
-                figure_size=(18, 8),
-                marker_size=8.0,
-                show_detector_hull=True,
-                show=False,
-                title_prefix=f"sample.py | Sampled data | using label from event {ref_idx}",
-                firsttime_title="FirstTime (sampled)",
-                npe_title="nPE (sampled)",
-            )
-            print(f"Sample image saved to: {img_output_path}")
-        else:
-            print("Note: geo_np or label_np not provided, skipping image generation")
+        print(f"\nSample {i+1}/{num_samples}:")
+        print(f"  Shape: {sample_np.shape}")
+        print(f"  nPE range: [{sample_np[0].min():.2f}, {sample_np[0].max():.2f}]")
+        print(f"  FirstTime range: [{sample_np[1].min():.2f}, {sample_np[1].max():.2f}]")
+        
+        # 시각화 및 저장
+        if output_dir:
+            # numpy 배열 저장
+            np_output_path = output_dir / f"sampled_event_{ref_idx}_sample_{i+1:03d}.npy"
+            np.save(np_output_path, sample_np)
+            print(f"  Saved numpy: {np_output_path}")
+            
+            # 이미지 저장 (geo와 label이 있을 때만)
+            if geo_np is not None and label_np is not None:
+                img_output_path = output_dir / f"sampled_event_{ref_idx}_sample_{i+1:03d}.png"
+                fig_sampled, _ = show_event_dual_plot(
+                    sig=sample_np,
+                    geo=geo_np,
+                    label=label_np,
+                    output_path=str(img_output_path),
+                    figure_size=(18, 8),
+                    marker_size=8.0,
+                    show_detector_hull=True,
+                    show=False,
+                    title_prefix=f"sample.py | Sampled data #{i+1} | using label from event {ref_idx}",
+                    firsttime_title="FirstTime (sampled)",
+                    npe_title="nPE (sampled)",
+                )
+                print(f"  Saved image: {img_output_path}")
+            
+            # 히스토그램 저장
+            if save_histogram:
+                hist_output_path = output_dir / f"sampled_event_{ref_idx}_sample_{i+1:03d}_histogram.png"
+                plot_histogram(sample_np, hist_output_path, title_suffix=f" (Sample #{i+1})")
+        
+        saved_samples.append(sample_np)
     
-    return sample_np
+    # 첫 번째 샘플 반환 (하위 호환성)
+    return saved_samples[0] if len(saved_samples) == 1 else saved_samples
 
 
 def main():
@@ -432,6 +501,7 @@ def main():
     parser.add_argument("--ref_idx", type=int, default=0, help="Dataset index to use label from")
     parser.add_argument("--label", type=str, default=None, help="Custom label as comma-separated values: Energy,ux,uy,X,Y,Z")
     parser.add_argument("--gpu", type=int, default=None, help="GPU ID to use (default: auto-select free GPU)")
+    parser.add_argument("--histogram", action="store_true", help="Save histogram plots for each sample")
     
     args = parser.parse_args()
     
@@ -496,6 +566,12 @@ def main():
             npe_title="nPE (actual)",
         )
         print(f"Actual data saved to: {actual_output_path}")
+        
+        # 원본 히스토그램도 저장 (옵션이 켜져있을 때)
+        if args.histogram:
+            actual_hist_path = output_dir / f"actual_event_{ref_idx}_histogram.png"
+            plot_histogram(sig_ref_denorm, actual_hist_path, title_suffix=" (Actual)")
+        
         del sig_ref_clamp, sig_ref_denorm
     
     # 샘플링
@@ -513,6 +589,7 @@ def main():
         ref_idx=ref_idx,
         geo_np=geo_np,
         label_np=label_np,
+        save_histogram=args.histogram,
     )
     
     print("Done!")
