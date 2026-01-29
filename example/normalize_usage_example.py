@@ -233,7 +233,8 @@ def main_with_normalization():
         )
     
     # Setup device
-    device = th.device(config.get("device", "cuda" if th.cuda.is_available() else "cpu"))
+    _default = "cuda" if th.cuda.is_available() else ("mps" if getattr(th.backends, "mps", None) and th.backends.mps.is_available() else "cpu")
+    device = th.device(config.get("device", _default))
     betas = betas.to(device)
     
     print("\nApplying forward diffusion with normalization...")

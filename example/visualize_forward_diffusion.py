@@ -351,7 +351,12 @@ def main():
         schedules.append((schedule_name, schedule_kwargs))
     
     # Move to device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     x_sig = x_sig.to(device)
     geom = geom.to(device)
     

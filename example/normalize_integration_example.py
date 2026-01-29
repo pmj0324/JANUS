@@ -114,7 +114,8 @@ def train_with_normalization_example():
             schedule_config["beta_end"]
         )
     
-    device = th.device(config.get("device", "cuda" if th.cuda.is_available() else "cpu"))
+    _default = "cuda" if th.cuda.is_available() else ("mps" if getattr(th.backends, "mps", None) and th.backends.mps.is_available() else "cpu")
+    device = th.device(config.get("device", _default))
     betas = betas.to(device)
     
     print("\n" + "="*80)

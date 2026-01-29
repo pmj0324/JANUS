@@ -26,27 +26,22 @@ from dataloader.h5 import H5Dataset
 from diffusion.schedules import sigmoid_beta_schedule, compute_alpha_schedule
 from utils.normalize import normalize, denormalize_log_minmax, apply_minmax_geo
 from utils.vis.event_show import show_event_dual_plot
+from utils.device import get_default_device
 
-def get_device(gpu_id: int = None):
-    """GPU 디바이스 반환. gpu_id가 None이면 자동으로 비어있는 GPU 선택."""
-    if not torch.cuda.is_available():
-        return torch.device("cpu")
-    
-    if gpu_id is not None:
-        if gpu_id >= torch.cuda.device_count():
-            raise ValueError(f"GPU {gpu_id} not available. Only {torch.cuda.device_count()} GPU(s) available.")
-        return torch.device(f"cuda:{gpu_id}")
-    
-    # 자동으로 비어있는 GPU 찾기
-    for i in range(torch.cuda.device_count()):
-        mem_allocated = torch.cuda.memory_allocated(i) / 1024**3  # GB
-        mem_reserved = torch.cuda.memory_reserved(i) / 1024**3  # GB
-        if mem_reserved < 1.0:  # 1GB 미만이면 비어있다고 간주
-            return torch.device(f"cuda:{i}")
-    
-    # 모두 사용 중이면 GPU 0 사용
-    print("Warning: All GPUs seem to be in use. Using GPU 0.")
-    return torch.device("cuda:0")
+
+def get_device(gpu_id: int = None) -> torch.device:
+    """GPU 디바이스 반환. CUDA 우선, 없으면 MPS(맥), 없으면 CPU. gpu_id는 CUDA 다중 GPU용."""
+    if torch.cuda.is_available():
+        if gpu_id is not None:
+            if gpu_id >= torch.cuda.device_count():
+                raise ValueError(f"GPU {gpu_id} not available. Only {torch.cuda.device_count()} GPU(s) available.")
+            return torch.device(f"cuda:{gpu_id}")
+        for i in range(torch.cuda.device_count()):
+            mem_reserved = torch.cuda.memory_reserved(i) / 1024**3
+            if mem_reserved < 1.0:
+                return torch.device(f"cuda:{i}")
+        return torch.device("cuda:0")
+    return get_default_device()
 
 device = get_device()
 print("device:", device)
@@ -409,7 +404,7 @@ def sample(
         for t_val in pbar:
             t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
             
-            with autocast('cuda', enabled=(scaler is not None)):
+            with autocast(device.type, enabled=(scaler is not None)):
                 eps_hat = model(x, t_batch, label_norm)
             
             idx = t_val - 1
@@ -443,6 +438,8 @@ def sample(
     del x, samples_denorm, label_norm
     if device.type == "cuda":
         torch.cuda.empty_cache()
+    elif device.type == "mps" and getattr(torch.mps, "empty_cache", None):
+        torch.mps.empty_cache()
     
     print("Sampling completed!")
     print(f"Generated {num_samples} sample(s)")

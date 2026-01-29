@@ -149,8 +149,9 @@ if __name__ == '__main__':
     alpha_bar_T = alphas_cumprod[-1].item()  # Last timestep T
     print(f"  Alpha_bar at T={timesteps}: {alpha_bar_T:.10f}")
     
-    # Setup device
-    device = th.device(config.get("device", "cuda" if th.cuda.is_available() else "cpu"))
+    # Setup device (CUDA > MPS > CPU)
+    _default = "cuda" if th.cuda.is_available() else ("mps" if getattr(th.backends, "mps", None) and th.backends.mps.is_available() else "cpu")
+    device = th.device(config.get("device", _default))
     betas = betas.to(device)
     print(f"Device: {device}")
     

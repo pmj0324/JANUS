@@ -12,7 +12,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import autocast
-from torch.cuda.amp import GradScaler
+try:
+    from torch.amp import GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -23,8 +26,9 @@ from diffusion.schedules import sigmoid_beta_schedule, compute_alpha_schedule
 from diffusion.forward import apply_forward_diffusion
 from utils.normalize import normalize, denormalize_log_minmax, apply_minmax_geo
 from utils.vis.event_show import show_event_dual_plot
+from utils.device import get_default_device
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_default_device()
 print("device:", device)
 
 # ---- 출력 폴더 생성 ----
@@ -42,12 +46,9 @@ lr = 3e-4
 num_epochs = 5
 print_every = 25  # batches per print
 
-# 데이터/정규화 (normalize_sig 방식): clamp 후 log1p + minmax to [-1, 1]
-npe_clip = 1000.0
-ftime_clip = 8.0
+# 데이터/정규화 (normalize_sig 방식): log1p + minmax to [-1, 1]
+# npe, firstTime 최댓값은 데이터셋 기준으로 계산 (아래에서 dataset 생성 후 설정)
 log_min = 0.0
-npe_log_max = float(np.log1p(npe_clip))
-ftime_log_max = float(np.log1p(ftime_clip))
 _feature_range = (-1, 1)
 
 # label 정규화: [Energy, ux, uy, X, Y, Z] -> Energy log_minmax, ux/uy identity, X/Y/Z minmax (dataset min/max)
@@ -104,11 +105,31 @@ def _print_label_normalize_config():
         print(f"  [{j}] {name}: {detail}")
 
 
-# h5 자동 탐색
+# h5 경로 및 데이터셋 (정규화 스케일 계산을 위해 먼저 생성)
 h5_path = "./GENESIS-data/22644_0921_time_shift.h5"
-
-# ---- dataset / dataloader ----
 dataset = H5Dataset(h5_path=h5_path)
+
+# 데이터셋 기준 npe, firstTime 최댓값 (log_minmax 스케일용)
+npe_max = 0.0
+ftime_max = 0.0
+for i in tqdm(range(len(dataset)), desc="sig range", leave=False):
+    sig_i, _, _ = dataset[i]
+    npe_max = max(npe_max, float(sig_i[0].max()))
+    ftime_max = max(ftime_max, float(sig_i[1].max()))
+# log_minmax 분모 0 방지 (전부 0인 경우 대비)
+npe_max = max(npe_max, 1e-6)
+ftime_max = max(ftime_max, 1e-6)
+npe_log_max = float(np.log1p(npe_max))
+ftime_log_max = float(np.log1p(ftime_max))
+print(f"sig data range (dataset): npe_max={npe_max:.4f}, ftime_max={ftime_max:.4f}")
+
+# _channel_stats는 npe_log_max, ftime_log_max 사용 (위에서 설정됨)
+_channel_stats = [
+    {"log_min": log_min, "log_max": npe_log_max},
+    {"log_min": log_min, "log_max": ftime_log_max},
+]
+
+# ---- dataloader ----
 _print_label_normalize_config()
 
 loader = DataLoader(
@@ -117,7 +138,7 @@ loader = DataLoader(
     shuffle=True, 
     num_workers=num_workers, 
     drop_last=True,
-    pin_memory=True if device.type == "cuda" else False,  # GPU 전송 속도 향상
+    pin_memory=(device.type == "cuda"),  # CUDA only; MPS/CPU use False
     persistent_workers=True if num_workers > 0 else False,  # 워커 재사용으로 오버헤드 감소
     prefetch_factor=2 if num_workers > 0 else None,  # 미리 로드할 배치 수
 )
@@ -131,13 +152,7 @@ print("geo_min (x,y,z):", geo_min)
 print("geo_max (x,y,z):", geo_max)
 
 # ---- normalization: decorator-wrapped prepare_batch (normalize_sig 동일 방식) ----
-# normalize_sig: clamp npe [0, npe_clip], ftime [0, ftime_clip]; then log_minmax per channel
-#   data_min=log_min, data_max=npe_log_max / ftime_log_max, feature_range=(-1, 1)
-_channel_stats = [
-    {"log_min": log_min, "log_max": npe_log_max},
-    {"log_min": log_min, "log_max": ftime_log_max},
-]
-
+# normalize_sig: log_minmax per channel (data_min=log_min, data_max=npe_log_max/ftime_log_max, feature_range=(-1, 1))
 @normalize(
     channel_methods=["log_minmax", "log_minmax"],
     feature_ranges=[_feature_range, _feature_range],
@@ -156,14 +171,6 @@ def prepare_batch(
     if verbose:
         print("prepare_batch: label", label)
     return (sig, label)
-
-
-def _clamp_sig(sig: torch.Tensor) -> torch.Tensor:
-    """Clamp npe/ftime before normalize (normalize_sig와 동일). Returns clamped copy."""
-    s = sig.clone()
-    s[:, 0] = torch.clamp(s[:, 0], min=0.0, max=npe_clip)
-    s[:, 1] = torch.clamp(s[:, 1], min=0.0, max=ftime_clip)
-    return s
 
 
 def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
@@ -367,8 +374,11 @@ _geo = apply_minmax_geo(_geo_raw, geo_min, geo_max, feature_range=(0, 1))
 model = DiffusionDiTTransformer(geo=_geo, d_model=256, nhead=8, depth=6, mlp_ratio=4.0, dropout=0.0, label_dim=6).to(device)
 optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
-# AMP (Automatic Mixed Precision) 설정
-scaler = GradScaler() if device.type == "cuda" else None
+# AMP (Automatic Mixed Precision): CUDA/MPS 지원
+try:
+    scaler = GradScaler(device.type) if device.type in ("cuda", "mps") else None
+except (TypeError, ValueError):
+    scaler = GradScaler() if device.type == "cuda" else None
 print("AMP enabled:", scaler is not None)
 
 # torch.compile() 최적화 (PyTorch 2.0+)
@@ -416,10 +426,9 @@ for epoch in range(1, num_epochs + 1):
         sig = sig.to(device, non_blocking=True)         # (B, 2, L)
         label = label.to(device, non_blocking=True)     # (B, 6)
 
-        sig_clamp = _clamp_sig(sig)
         if epoch == 1 and batch_idx == 1:
             _label_raw_before = label.clone()
-        x0, label = prepare_batch(sig_clamp, label, verbose=(epoch == 1 and batch_idx == 1))  # (B, 2, L) in [-1, 1]
+        x0, label = prepare_batch(sig, label, verbose=(epoch == 1 and batch_idx == 1))  # (B, 2, L) in [-1, 1]
         if epoch == 1 and batch_idx == 1:
             print("prepare_batch: label (raw, same batch)", _label_raw_before)
             for j in [1, 2]:
@@ -433,7 +442,7 @@ for epoch in range(1, num_epochs + 1):
         x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
 
         # AMP: forward pass를 autocast로 감싸기
-        with autocast('cuda', enabled=(scaler is not None)):
+        with autocast(device.type, enabled=(scaler is not None)):
             eps_hat = model(x_t, t, label)
             loss = F.mse_loss(eps_hat, noise)
 
@@ -523,8 +532,7 @@ label_np = label_raw.detach().cpu().numpy()
 sig = sig_raw.unsqueeze(0).to(device)  # (1,2,L)
 label = label_raw.unsqueeze(0).to(device)  # (1,6)
 
-sig_clamp = _clamp_sig(sig)
-x0, label = prepare_batch(sig_clamp, label, verbose=True)
+x0, label = prepare_batch(sig, label, verbose=True)
 
 for t_val in [0, 250, 500, 750, 1000]:
     t = torch.tensor([t_val], device=device, dtype=torch.long)
@@ -560,8 +568,8 @@ with torch.no_grad():
     sig_ref_raw, geo_ref_raw, label_ref_raw = dataset[ref_idx]
     
     # 실제 데이터 준비 (denormalized 상태로 그림 그리기 위해)
-    sig_ref_clamp = _clamp_sig(sig_ref_raw.unsqueeze(0).to(device))
-    sig_ref_denorm = sig_ref_clamp[0].detach().cpu().numpy()  # 이미 denormalized (clamp만 적용)
+    sig_ref = sig_ref_raw.unsqueeze(0).to(device)
+    sig_ref_denorm = sig_ref[0].detach().cpu().numpy()
     geo_ref_np = geo_ref_raw.detach().cpu().numpy()
     label_ref_np = label_ref_raw.detach().cpu().numpy()
     
@@ -585,7 +593,7 @@ with torch.no_grad():
     
     # 샘플링을 위한 label 정규화 (prepare_batch 사용)
     label_ref = label_ref_raw.unsqueeze(0).to(device)  # (1, 6) - raw label
-    _, label_ref_norm = prepare_batch(sig_ref_clamp, label_ref, verbose=False)  # label만 정규화
+    _, label_ref_norm = prepare_batch(sig_ref, label_ref, verbose=False)  # label만 정규화
     
     # 샘플링 파라미터
     num_samples = 1
@@ -600,7 +608,7 @@ with torch.no_grad():
         t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
         
         # 모델로 노이즈 예측 (정규화된 label 사용) - AMP 적용
-        with autocast('cuda', enabled=(scaler is not None)):
+        with autocast(device.type, enabled=(scaler is not None)):
             eps_hat = model(x, t_batch, label_ref_norm)  # (B, 2, L)
         
         # DDPM 업데이트
