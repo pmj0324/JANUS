@@ -344,23 +344,32 @@ def sample(
     print(f"Sample FirstTime range: [{sample_np[1].min():.2f}, {sample_np[1].max():.2f}]")
     
     # 시각화 및 저장
-    if output_dir and geo_np is not None and label_np is not None:
-        output_path = output_dir / f"sampled_event_{ref_idx}.png"
-        print(f"Plotting sampled data...")
-        fig_sampled, _ = show_event_dual_plot(
-            sig=sample_np,
-            geo=geo_np,
-            label=label_np,
-            output_path=str(output_path),
-            figure_size=(18, 8),
-            marker_size=8.0,
-            show_detector_hull=True,
-            show=False,
-            title_prefix=f"sample.py | Sampled data | using label from event {ref_idx}",
-            firsttime_title="FirstTime (sampled)",
-            npe_title="nPE (sampled)",
-        )
-        print(f"Sampled event saved to: {output_path}")
+    if output_dir:
+        # numpy 배열 저장
+        np_output_path = output_dir / f"sampled_event_{ref_idx}.npy"
+        np.save(np_output_path, sample_np)
+        print(f"Sample numpy array saved to: {np_output_path}")
+        
+        # 이미지 저장 (geo와 label이 있을 때만)
+        if geo_np is not None and label_np is not None:
+            img_output_path = output_dir / f"sampled_event_{ref_idx}.png"
+            print(f"Plotting sampled data...")
+            fig_sampled, _ = show_event_dual_plot(
+                sig=sample_np,
+                geo=geo_np,
+                label=label_np,
+                output_path=str(img_output_path),
+                figure_size=(18, 8),
+                marker_size=8.0,
+                show_detector_hull=True,
+                show=False,
+                title_prefix=f"sample.py | Sampled data | using label from event {ref_idx}",
+                firsttime_title="FirstTime (sampled)",
+                npe_title="nPE (sampled)",
+            )
+            print(f"Sample image saved to: {img_output_path}")
+        else:
+            print("Note: geo_np or label_np not provided, skipping image generation")
     
     return sample_np
 
@@ -387,6 +396,7 @@ def main():
     scaler = GradScaler() if device.type == "cuda" else None
     
     # Label 준비
+    geo_np = None
     if args.label:
         # 사용자 지정 label
         label_values = [float(x.strip()) for x in args.label.split(",")]
@@ -394,7 +404,10 @@ def main():
             raise ValueError("Label must have 6 values: Energy,ux,uy,X,Y,Z")
         label = torch.tensor(label_values, device=device, dtype=torch.float32)
         label_np = label.detach().cpu().numpy()
-        ref_idx = None
+        ref_idx = 0  # 사용자 지정 label일 때는 ref_idx를 0으로 설정
+        # geo는 데이터셋에서 가져오기
+        sig_ref_raw, geo_ref_raw, _ = dataset[0]
+        geo_np = geo_ref_raw.detach().cpu().numpy()
     else:
         # 데이터셋에서 label 가져오기
         ref_idx = args.ref_idx
@@ -418,8 +431,8 @@ def main():
         device=device,
         scaler=scaler,
         output_dir=output_dir,
-        ref_idx=ref_idx if ref_idx is not None else 0,
-        geo_np=geo_np if 'geo_np' in locals() else None,
+        ref_idx=ref_idx,
+        geo_np=geo_np,
         label_np=label_np,
     )
     
