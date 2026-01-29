@@ -44,7 +44,6 @@ batch_size = 128
 num_workers = 8  # 데이터 로딩 병렬화 (CPU 코어 수에 맞게 조정 가능, 0은 병렬화 없음)
 lr = 3e-4
 num_epochs = 5
-print_every = 25  # batches per print
 
 # 데이터/정규화: nPE는 clamp 후 minmax만, FirstTime은 clamp 후 log_minmax
 npe_clip = 1000.0
@@ -495,18 +494,12 @@ for epoch in range(1, num_epochs + 1):
             torch.save(checkpoint, best_checkpoint_path)
         
         # tqdm 업데이트
-        avg_loss_recent = np.mean(epoch_losses[-print_every:]) if len(epoch_losses) >= print_every else np.mean(epoch_losses)
+        avg_loss_so_far = np.mean(epoch_losses)
         pbar.set_postfix({
-            "loss": f"{avg_loss_recent:.6f}", 
+            "loss": f"{avg_loss_so_far:.6f}", 
             "step": current_step,
             "best": f"{best_loss:.6f}"
         })
-        
-        # Print progress
-        if batch_idx % print_every == 0 or batch_idx == steps_per_epoch:
-            avg_loss = np.mean(epoch_losses[-print_every:])
-            save_status = f"NEW BEST!" if loss_val < best_loss else f"best: {best_loss:.6f}"
-            print(f"\nepoch {epoch:3d}/{num_epochs} | batch {batch_idx:4d}/{steps_per_epoch} | step {current_step:5d}/{total_steps} | loss {avg_loss:.6f} | {save_status}")
     
     # Epoch summary
     epoch_avg_loss = np.mean(epoch_losses)
