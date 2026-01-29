@@ -13,7 +13,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.amp import autocast
-from torch.cuda.amp import GradScaler
+try:
+    from torch.amp import GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler
 from tqdm import tqdm
 
 # Add GENESIS to path
@@ -23,7 +26,28 @@ from diffusion.schedules import sigmoid_beta_schedule, compute_alpha_schedule
 from utils.normalize import normalize, denormalize_log_minmax, apply_minmax_geo
 from utils.vis.event_show import show_event_dual_plot
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def get_device(gpu_id: int = None):
+    """GPU 디바이스 반환. gpu_id가 None이면 자동으로 비어있는 GPU 선택."""
+    if not torch.cuda.is_available():
+        return torch.device("cpu")
+    
+    if gpu_id is not None:
+        if gpu_id >= torch.cuda.device_count():
+            raise ValueError(f"GPU {gpu_id} not available. Only {torch.cuda.device_count()} GPU(s) available.")
+        return torch.device(f"cuda:{gpu_id}")
+    
+    # 자동으로 비어있는 GPU 찾기
+    for i in range(torch.cuda.device_count()):
+        mem_allocated = torch.cuda.memory_allocated(i) / 1024**3  # GB
+        mem_reserved = torch.cuda.memory_reserved(i) / 1024**3  # GB
+        if mem_reserved < 1.0:  # 1GB 미만이면 비어있다고 간주
+            return torch.device(f"cuda:{i}")
+    
+    # 모두 사용 중이면 GPU 0 사용
+    print("Warning: All GPUs seem to be in use. Using GPU 0.")
+    return torch.device("cuda:0")
+
+device = get_device()
 print("device:", device)
 
 # ---- 정규화 설정 (train_exp.py와 동일) ----
@@ -311,10 +335,12 @@ def sample(
     B = num_samples
     
     # Label 정규화 (dummy sig 사용)
-    dummy_sig = torch.zeros(1, 2, model.L, device=device)
-    _, label_norm = prepare_batch(dummy_sig, label.unsqueeze(0) if label.dim() == 1 else label, verbose=False)
-    if label_norm.dim() == 1:
-        label_norm = label_norm.unsqueeze(0)
+    with torch.no_grad():
+        dummy_sig = torch.zeros(1, 2, model.L, device=device)
+        _, label_norm = prepare_batch(dummy_sig, label.unsqueeze(0) if label.dim() == 1 else label, verbose=False)
+        if label_norm.dim() == 1:
+            label_norm = label_norm.unsqueeze(0)
+        del dummy_sig
     
     # x_T ~ N(0, I)로 시작
     x = torch.randn(B, 2, model.L, device=device)
@@ -323,34 +349,44 @@ def sample(
     print("Running reverse diffusion (T -> 1)...")
     pbar = tqdm(reversed(range(1, T + 1)), total=T, desc="Sampling")
     
-    for t_val in pbar:
-        t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
-        
-        with autocast('cuda', enabled=(scaler is not None)):
-            eps_hat = model(x, t_batch, label_norm)
-        
-        idx = t_val - 1
-        alpha_t = alphas[idx]
-        alpha_bar_t = alphas_cumprod[idx]
-        
-        mean = (1.0 / torch.sqrt(alpha_t)) * (
-            x - (betas[idx] / torch.sqrt(1.0 - alpha_bar_t)) * eps_hat
-        )
-        
-        if t_val > 1:
-            alpha_bar_prev = alphas_cumprod[idx - 1] if idx > 0 else torch.tensor(1.0, device=device)
-            posterior_variance = betas[idx] * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
-            var = torch.sqrt(posterior_variance)
-            noise = torch.randn_like(x)
-            x = mean + var * noise
-        else:
-            x = mean
-        
-        pbar.set_postfix({"t": t_val, "mean": f"{x.mean().item():.4f}", "std": f"{x.std().item():.4f}"})
+    with torch.no_grad():  # Gradient 계산 불필요 (inference)
+        for t_val in pbar:
+            t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
+            
+            with autocast('cuda', enabled=(scaler is not None)):
+                eps_hat = model(x, t_batch, label_norm)
+            
+            idx = t_val - 1
+            alpha_t = alphas[idx]
+            alpha_bar_t = alphas_cumprod[idx]
+            
+            mean = (1.0 / torch.sqrt(alpha_t)) * (
+                x - (betas[idx] / torch.sqrt(1.0 - alpha_bar_t)) * eps_hat
+            )
+            
+            if t_val > 1:
+                alpha_bar_prev = alphas_cumprod[idx - 1] if idx > 0 else torch.tensor(1.0, device=device)
+                posterior_variance = betas[idx] * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
+                var = torch.sqrt(posterior_variance)
+                noise = torch.randn_like(x)
+                x = mean + var * noise
+                del noise, var, posterior_variance, alpha_bar_prev
+            else:
+                x = mean
+            
+            # 중간 변수 정리
+            del eps_hat, mean, alpha_t, alpha_bar_t, t_batch
+            
+            pbar.set_postfix({"t": t_val, "mean": f"{x.mean().item():.4f}", "std": f"{x.std().item():.4f}"})
     
     # 샘플 역정규화
     samples_denorm = denormalize_sig(x)
     sample_np = samples_denorm[0].detach().cpu().numpy()
+    
+    # GPU 메모리 정리
+    del x, samples_denorm, label_norm
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     
     print("Sampling completed!")
     print(f"Sample shape: {sample_np.shape}")
@@ -395,8 +431,14 @@ def main():
     parser.add_argument("--num_samples", type=int, default=1, help="Number of samples to generate")
     parser.add_argument("--ref_idx", type=int, default=0, help="Dataset index to use label from")
     parser.add_argument("--label", type=str, default=None, help="Custom label as comma-separated values: Energy,ux,uy,X,Y,Z")
+    parser.add_argument("--gpu", type=int, default=None, help="GPU ID to use (default: auto-select free GPU)")
     
     args = parser.parse_args()
+    
+    # GPU 선택
+    global device
+    device = get_device(args.gpu)
+    print(f"Using device: {device}")
     
     # 출력 폴더 생성
     output_dir = Path(args.output_dir)
@@ -406,8 +448,8 @@ def main():
     # 모델 로드
     model, betas, alphas, alphas_cumprod, T, dataset = load_model(args.checkpoint, device)
     
-    # AMP 설정
-    scaler = GradScaler() if device.type == "cuda" else None
+    # AMP 설정 (샘플링에는 필요 없지만 호환성을 위해)
+    scaler = None  # 샘플링은 inference이므로 GradScaler 불필요
     
     # Label 준비
     geo_np = None
