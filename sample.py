@@ -475,6 +475,29 @@ def main():
     print(f"Using label: {label_np}")
     print(f"Label names: {LABEL_NAMES}")
     
+    # 원본 이미지 저장 (데이터셋에서 가져온 경우만)
+    if not args.label:  # 사용자 지정 label이 아닐 때만
+        print(f"\nPlotting actual data from index {ref_idx}...")
+        sig_ref_clamp = _clamp_sig(sig_ref_raw.unsqueeze(0).to(device))
+        sig_ref_denorm = sig_ref_clamp[0].detach().cpu().numpy()  # clamp만 적용된 상태
+        
+        actual_output_path = output_dir / f"actual_event_{ref_idx}.png"
+        fig_actual, _ = show_event_dual_plot(
+            sig=sig_ref_denorm,
+            geo=geo_np,
+            label=label_np,
+            output_path=str(actual_output_path),
+            figure_size=(18, 8),
+            marker_size=8.0,
+            show_detector_hull=True,
+            show=False,
+            title_prefix=f"sample.py | Actual data | event {ref_idx}",
+            firsttime_title="FirstTime (actual)",
+            npe_title="nPE (actual)",
+        )
+        print(f"Actual data saved to: {actual_output_path}")
+        del sig_ref_clamp, sig_ref_denorm
+    
     # 샘플링
     sample_np = sample(
         model=model,
