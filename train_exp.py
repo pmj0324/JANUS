@@ -36,10 +36,10 @@ print(f"Output directory: {output_dir.absolute()}")
 T = 1000
 beta_start, beta_end = 1e-4, 2e-2  # sigmoid schedule params
 
-batch_size = 16
-num_workers = 4  # 데이터 로딩 병렬화 (CPU 코어 수에 맞게 조정 가능, 0은 병렬화 없음)
+batch_size = 128
+num_workers = 8  # 데이터 로딩 병렬화 (CPU 코어 수에 맞게 조정 가능, 0은 병렬화 없음)
 lr = 3e-4
-num_epochs = 10
+num_epochs = 5
 print_every = 25  # batches per print
 
 # 데이터/정규화 (normalize_sig 방식): clamp 후 log1p + minmax to [-1, 1]
