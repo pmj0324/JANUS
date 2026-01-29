@@ -227,10 +227,22 @@ class DiffusionDiTTransformer(nn.Module):
         return out.permute(0, 2, 1)
 
 
+def remove_orig_mod_prefix(state_dict: dict) -> dict:
+    """torch.compile()으로 컴파일된 모델의 state_dict에서 _orig_mod. 접두사 제거."""
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith("_orig_mod."):
+            new_key = key[len("_orig_mod."):]
+            new_state_dict[new_key] = value
+        else:
+            new_state_dict[key] = value
+    return new_state_dict
+
+
 def load_model(checkpoint_path: str, device: torch.device):
     """모델 체크포인트를 로드하고 모델을 반환."""
     print(f"Loading model from: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # 체크포인트에서 설정 읽기
     T = checkpoint.get("T", 1000)
@@ -261,8 +273,10 @@ def load_model(checkpoint_path: str, device: torch.device):
         label_dim=label_dim,
     ).to(device)
     
-    # 가중치 로드
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # 가중치 로드 (torch.compile() 접두사 제거)
+    state_dict = checkpoint["model_state_dict"]
+    state_dict = remove_orig_mod_prefix(state_dict)
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
     
     # Noise schedule 재계산
