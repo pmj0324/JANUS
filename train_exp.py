@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
@@ -20,7 +21,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
 
 from dataloader.h5 import H5Dataset
-from diffusion.schedules import sigmoid_beta_schedule
+from diffusion.schedules import sigmoid_beta_schedule, compute_alpha_schedule
 from diffusion.forward import apply_forward_diffusion
 from utils.normalize import normalize, denormalize_log_minmax, apply_minmax_geo
 from utils.vis.event_show import show_event_dual_plot
@@ -32,11 +33,11 @@ print("device:", device)
 T = 1000
 beta_start, beta_end = 1e-4, 2e-2  # sigmoid schedule params
 
-batch_size = 1
-num_workers = 0  # 노트북에서는 0 추천
+batch_size = 16
+num_workers = 4  # 데이터 로딩 병렬화 (CPU 코어 수에 맞게 조정 가능, 0은 병렬화 없음)
 lr = 3e-4
-steps = 500
-print_every = 25
+num_epochs = 10
+print_every = 25  # batches per print
 
 # 데이터/정규화 (normalize_sig 방식): clamp 후 log1p + minmax to [-1, 1]
 npe_clip = 1000.0
@@ -101,13 +102,22 @@ def _print_label_normalize_config():
 
 
 # h5 자동 탐색
-h5_path = "/Users/monocerotis/0121/git0121/GENESIS/GENESIS-data/22644_0921_time_shift.h5"
+h5_path = "./GENESIS-data/22644_0921_time_shift.h5"
 
 # ---- dataset / dataloader ----
 dataset = H5Dataset(h5_path=h5_path)
 _print_label_normalize_config()
 
-loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
+loader = DataLoader(
+    dataset, 
+    batch_size=batch_size, 
+    shuffle=True, 
+    num_workers=num_workers, 
+    drop_last=True,
+    pin_memory=True if device.type == "cuda" else False,  # GPU 전송 속도 향상
+    persistent_workers=True if num_workers > 0 else False,  # 워커 재사용으로 오버헤드 감소
+    prefetch_factor=2 if num_workers > 0 else None,  # 미리 로드할 배치 수
+)
 
 print("dataset length:", len(dataset))
 sig0, geo0, label0 = dataset[0]
@@ -166,11 +176,14 @@ def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
 
 
 def sample_timesteps(batch: int, T: int, device: torch.device) -> torch.Tensor:
-    """t in [0, T] (note: forward code treats t=0 as clean)"""
-    return torch.randint(low=0, high=T + 1, size=(batch,), device=device, dtype=torch.long)
+    """t in [1, T] (t=0은 노이즈가 없는 원본이므로 학습에서 제외)"""
+    return torch.randint(low=1, high=T + 1, size=(batch,), device=device, dtype=torch.long)
 
 # ---- sigmoid noise schedule ----
 betas = sigmoid_beta_schedule(timesteps=T, beta_start=beta_start, beta_end=beta_end).to(device)
+alpha_schedule = compute_alpha_schedule(betas)
+alphas = alpha_schedule["alphas"]
+alphas_cumprod = alpha_schedule["alphas_cumprod"]
 print("betas:", betas.shape, betas.min().item(), betas.max().item())
 
 # ---- Transformer (DiT-style): token=DOM, conditional on t + label ----
@@ -351,54 +364,92 @@ _geo = apply_minmax_geo(_geo_raw, geo_min, geo_max, feature_range=(0, 1))
 model = DiffusionDiTTransformer(geo=_geo, d_model=256, nhead=8, depth=6, mlp_ratio=4.0, dropout=0.0, label_dim=6).to(device)
 optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
+# AMP (Automatic Mixed Precision) 설정
+scaler = GradScaler() if device.type == "cuda" else None
+print("AMP enabled:", scaler is not None)
+
+# torch.compile() 최적화 (PyTorch 2.0+)
+# 모델을 컴파일하여 실행 속도 향상 (약 20-30% 빠름)
+try:
+    if hasattr(torch, 'compile'):
+        print("Compiling model with torch.compile()...")
+        model = torch.compile(model, mode="reduce-overhead")  # 또는 "max-autotune" (더 느린 컴파일, 더 빠른 실행)
+        print("Model compilation successful!")
+    else:
+        print("torch.compile() not available (requires PyTorch 2.0+)")
+except Exception as e:
+    print(f"Model compilation failed (continuing without compile): {e}")
+
 print("params:", sum(p.numel() for p in model.parameters())/1e6, "M")
 
 # ---- training loop (objective: eps) ----
 model.train()
 
-it = iter(loader)
 loss_hist = []
+steps_per_epoch = len(loader)
+total_steps = num_epochs * steps_per_epoch
 
-for step in range(1, steps + 1):
-    try:
-        sig, geo, label = next(it)
-    except StopIteration:
-        it = iter(loader)
-        sig, geo, label = next(it)
+print(f"Training for {num_epochs} epochs ({steps_per_epoch} batches per epoch, {total_steps} total steps)")
+print("="*60)
 
-    sig = sig.to(device)         # (B, 2, L)
-    label = label.to(device)     # (B, 6)
+for epoch in range(1, num_epochs + 1):
+    epoch_losses = []
+    
+    for batch_idx, (sig, geo, label) in enumerate(loader, 1):
+        # pin_memory=True일 때 non_blocking으로 전송 속도 향상
+        sig = sig.to(device, non_blocking=True)         # (B, 2, L)
+        label = label.to(device, non_blocking=True)     # (B, 6)
 
-    sig_clamp = _clamp_sig(sig)
-    if step == 1:
-        _label_raw_before = label.clone()
-    x0, label = prepare_batch(sig_clamp, label, verbose=(step == 1))  # (B, 2, L) in [-1, 1]
-    if step == 1:
-        print("prepare_batch: label (raw, same batch)", _label_raw_before)
-        for j in [1, 2]:
-            ok = torch.allclose(_label_raw_before[:, j], label[:, j])
-            print(f"  identity col {j} ({LABEL_NAMES[j]}): {'OK' if ok else 'MISMATCH'} raw={_label_raw_before[0, j].item():.6f} norm={label[0, j].item():.6f}")
+        sig_clamp = _clamp_sig(sig)
+        if epoch == 1 and batch_idx == 1:
+            _label_raw_before = label.clone()
+        x0, label = prepare_batch(sig_clamp, label, verbose=(epoch == 1 and batch_idx == 1))  # (B, 2, L) in [-1, 1]
+        if epoch == 1 and batch_idx == 1:
+            print("prepare_batch: label (raw, same batch)", _label_raw_before)
+            for j in [1, 2]:
+                ok = torch.allclose(_label_raw_before[:, j], label[:, j])
+                print(f"  identity col {j} ({LABEL_NAMES[j]}): {'OK' if ok else 'MISMATCH'} raw={_label_raw_before[0, j].item():.6f} norm={label[0, j].item():.6f}")
 
-    B = x0.shape[0]
-    t = sample_timesteps(B, T, device)
+        B = x0.shape[0]
+        t = sample_timesteps(B, T, device)
 
-    noise = torch.randn_like(x0)
-    x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
+        noise = torch.randn_like(x0)
+        x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
 
-    eps_hat = model(x_t, t, label)
-    loss = F.mse_loss(eps_hat, noise)
+        # AMP: forward pass를 autocast로 감싸기
+        with autocast(enabled=(scaler is not None)):
+            eps_hat = model(x_t, t, label)
+            loss = F.mse_loss(eps_hat, noise)
 
-    optim.zero_grad(set_to_none=True)
-    loss.backward()
-    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    optim.step()
+        optim.zero_grad(set_to_none=True)
+        # AMP: loss를 scaler로 감싸서 backward
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optim)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optim)
+            scaler.update()
+        else:
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optim.step()
 
-    loss_hist.append(float(loss.item()))
+        loss_val = float(loss.item())
+        loss_hist.append(loss_val)
+        epoch_losses.append(loss_val)
 
-    if step % print_every == 0:
-        print(f"step {step:5d} | loss {np.mean(loss_hist[-print_every:]):.6f}")
+        # Print progress
+        current_step = (epoch - 1) * steps_per_epoch + batch_idx
+        if batch_idx % print_every == 0 or batch_idx == steps_per_epoch:
+            avg_loss = np.mean(epoch_losses[-print_every:])
+            print(f"epoch {epoch:3d}/{num_epochs} | batch {batch_idx:4d}/{steps_per_epoch} | step {current_step:5d}/{total_steps} | loss {avg_loss:.6f}")
+    
+    # Epoch summary
+    epoch_avg_loss = np.mean(epoch_losses)
+    print(f"epoch {epoch:3d}/{num_epochs} completed | avg loss: {epoch_avg_loss:.6f}")
+    print("-"*60)
 
-print("done")
+print("Training done!")
 
 # ---- quick visualization: one event, different t ----
 model.eval()
@@ -422,10 +473,12 @@ for t_val in [0, 250, 500, 750, 1000]:
     # 출력 역정규화 후 시각화 (prepare_batch 출력용 denormalize_sig)
     x_t_denorm = denormalize_sig(x_t)[0].detach().cpu().numpy()
 
+    output_path = f"event_{event_idx}_t_{t_val}.png"
     fig, _ = show_event_dual_plot(
         sig=x_t_denorm,
         geo=geo_np,
         label=label_np,
+        output_path=output_path,
         figure_size=(18, 8),
         marker_size=8.0,
         show_detector_hull=True,
@@ -434,4 +487,135 @@ for t_val in [0, 250, 500, 750, 1000]:
         firsttime_title="FirstTime (x_t, denorm)",
         npe_title="nPE (x_t, denorm)",
     )
-    plt.show()
+
+# ---- Sampling: Generate new samples using label from first index ----
+print("\n" + "="*60)
+print("Sampling from trained model using label from first index...")
+print("="*60)
+
+model.eval()
+with torch.no_grad():
+    # 첫 번째 인덱스의 실제 데이터 가져오기
+    ref_idx = 0
+    sig_ref_raw, geo_ref_raw, label_ref_raw = dataset[ref_idx]
+    
+    # 실제 데이터 준비 (denormalized 상태로 그림 그리기 위해)
+    sig_ref_clamp = _clamp_sig(sig_ref_raw.unsqueeze(0).to(device))
+    sig_ref_denorm = sig_ref_clamp[0].detach().cpu().numpy()  # 이미 denormalized (clamp만 적용)
+    geo_ref_np = geo_ref_raw.detach().cpu().numpy()
+    label_ref_np = label_ref_raw.detach().cpu().numpy()
+    
+    # 실제 데이터 그림 그리기
+    print(f"Plotting actual data from index {ref_idx}...")
+    actual_output_path = f"actual_event_{ref_idx}.png"
+    fig_actual, _ = show_event_dual_plot(
+        sig=sig_ref_denorm,
+        geo=geo_ref_np,
+        label=label_ref_np,
+        output_path=actual_output_path,
+        figure_size=(18, 8),
+        marker_size=8.0,
+        show_detector_hull=True,
+        show=False,
+        title_prefix=f"train_exp.py | Actual data | event {ref_idx}",
+        firsttime_title="FirstTime (actual)",
+        npe_title="nPE (actual)",
+    )
+    print(f"Actual data saved to: {actual_output_path}")
+    
+    # 샘플링을 위한 label 정규화 (prepare_batch 사용)
+    label_ref = label_ref_raw.unsqueeze(0).to(device)  # (1, 6) - raw label
+    _, label_ref_norm = prepare_batch(sig_ref_clamp, label_ref, verbose=False)  # label만 정규화
+    
+    # 샘플링 파라미터
+    num_samples = 1
+    B = num_samples
+    
+    # x_T ~ N(0, I)로 시작 (정규화된 공간)
+    x = torch.randn(B, 2, model.L, device=device)
+    
+    # DDPM 역확산: T -> 1
+    print("Running reverse diffusion (T -> 1)...")
+    for t_val in reversed(range(1, T + 1)):
+        t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
+        
+        # 모델로 노이즈 예측 (정규화된 label 사용) - AMP 적용
+        with autocast(enabled=(scaler is not None)):
+            eps_hat = model(x, t_batch, label_ref_norm)  # (B, 2, L)
+        
+        # DDPM 업데이트
+        idx = t_val - 1  # t > 0이므로 t-1을 인덱스로 사용
+        alpha_t = alphas[idx]
+        alpha_bar_t = alphas_cumprod[idx]
+        
+        # 평균 계산: μ_θ(x_t, t) = (1/sqrt(α_t)) * (x_t - (β_t / sqrt(1-ᾱ_t)) * ε_θ)
+        mean = (1.0 / torch.sqrt(alpha_t)) * (
+            x - (betas[idx] / torch.sqrt(1.0 - alpha_bar_t)) * eps_hat
+        )
+        
+        # 분산 계산 (posterior variance)
+        if t_val > 1:
+            alpha_bar_prev = alphas_cumprod[idx - 1] if idx > 0 else torch.tensor(1.0, device=device)
+            posterior_variance = betas[idx] * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
+            var = torch.sqrt(posterior_variance)
+            noise = torch.randn_like(x)
+            x = mean + var * noise
+        else:
+            # t=1: 최종 단계, 평균 반환
+            x = mean
+        
+        if t_val % 100 == 0 or t_val <= 10:
+            print(f"  t={t_val:4d} | x_norm: mean={x.mean().item():.4f}, std={x.std().item():.4f}")
+    
+    # 샘플 역정규화
+    samples_denorm = denormalize_sig(x)  # (B, 2, L)
+    sample_np = samples_denorm[0].detach().cpu().numpy()
+    
+    print("Sampling completed!")
+    print(f"Sample shape: {sample_np.shape}")
+    print(f"Sample nPE range: [{sample_np[0].min():.2f}, {sample_np[0].max():.2f}]")
+    print(f"Sample FirstTime range: [{sample_np[1].min():.2f}, {sample_np[1].max():.2f}]")
+    
+    # 샘플 시각화 및 저장
+    print(f"Plotting sampled data using label from index {ref_idx}...")
+    sampled_output_path = f"sampled_event_{ref_idx}.png"
+    fig_sampled, _ = show_event_dual_plot(
+        sig=sample_np,
+        geo=geo_ref_np,
+        label=label_ref_np,
+        output_path=sampled_output_path,
+        figure_size=(18, 8),
+        marker_size=8.0,
+        show_detector_hull=True,
+        show=False,
+        title_prefix=f"train_exp.py | Sampled data | using label from event {ref_idx}",
+        firsttime_title="FirstTime (sampled)",
+        npe_title="nPE (sampled)",
+    )
+    print(f"Sampled event saved to: {sampled_output_path}")
+
+# ---- Save model ----
+print("\n" + "="*60)
+print("Saving model...")
+print("="*60)
+
+model_save_path = "model_checkpoint.pt"
+checkpoint = {
+    "model_state_dict": model.state_dict(),
+    "optimizer_state_dict": optim.state_dict(),
+    "betas": betas.cpu(),
+    "alphas": alphas.cpu(),
+    "alphas_cumprod": alphas_cumprod.cpu(),
+    "T": T,
+    "beta_start": beta_start,
+    "beta_end": beta_end,
+    "d_model": model.d_model,
+    "nhead": 8,
+    "depth": 6,
+    "mlp_ratio": 4.0,
+    "label_dim": 6,
+}
+
+torch.save(checkpoint, model_save_path)
+print(f"Model saved to: {model_save_path}")
+print("Done!")
