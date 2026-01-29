@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
 from dataloader.h5 import H5Dataset
 from diffusion.schedules import sigmoid_beta_schedule, compute_alpha_schedule
-from utils.normalize import normalize, denormalize_log_minmax, apply_minmax_geo
+from utils.normalize import normalize, denormalize_log_minmax, denormalize_minmax, apply_minmax_geo
 from utils.vis.event_show import show_event_dual_plot
 from utils.device import get_default_device
 
@@ -48,7 +48,7 @@ print("device:", device)
 
 # ---- 정규화 설정 (train_exp.py와 동일) ----
 npe_clip = 1000.0
-ftime_clip = 8.0
+ftime_clip = 21000.0
 log_min = 0.0
 npe_log_max = float(np.log1p(npe_clip))
 ftime_log_max = float(np.log1p(ftime_clip))
@@ -83,12 +83,12 @@ _label_stats = [
 LABEL_NAMES = ["Energy (PeV)", "ux", "uy", "X", "Y", "Z"]
 
 _channel_stats = [
-    {"log_min": log_min, "log_max": npe_log_max},
+    {"min": 0.0, "max": npe_clip},   # nPE: log 없이 minmax
     {"log_min": log_min, "log_max": ftime_log_max},
 ]
 
 @normalize(
-    channel_methods=["log_minmax", "log_minmax"],
+    channel_methods=["minmax", "log_minmax"],
     feature_ranges=[_feature_range, _feature_range],
     channel_stats=_channel_stats,
     arg_index=0,
@@ -115,13 +115,13 @@ def _clamp_sig(sig: torch.Tensor) -> torch.Tensor:
 
 
 def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
-    """정규화된 sig ([-1, 1] log_minmax)를 원 스케일로 역정규화."""
+    """정규화된 sig를 원 스케일로 역정규화. nPE는 minmax 역변환, FirstTime은 log_minmax 역변환."""
     out = sig.clone()
     if sig.dim() == 3:
-        out[:, 0, :] = denormalize_log_minmax(sig[:, 0, :], log_min, npe_log_max, _feature_range)
+        out[:, 0, :] = denormalize_minmax(sig[:, 0, :], 0.0, npe_clip, _feature_range)
         out[:, 1, :] = denormalize_log_minmax(sig[:, 1, :], log_min, ftime_log_max, _feature_range)
     else:
-        out[0, :] = denormalize_log_minmax(sig[0, :], log_min, npe_log_max, _feature_range)
+        out[0, :] = denormalize_minmax(sig[0, :], 0.0, npe_clip, _feature_range)
         out[1, :] = denormalize_log_minmax(sig[1, :], log_min, ftime_log_max, _feature_range)
     return out
 

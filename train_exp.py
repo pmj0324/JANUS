@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
 from dataloader.h5 import H5Dataset
 from diffusion.schedules import sigmoid_beta_schedule, compute_alpha_schedule
 from diffusion.forward import apply_forward_diffusion
-from utils.normalize import normalize, denormalize_log_minmax, apply_minmax_geo
+from utils.normalize import normalize, denormalize_log_minmax, denormalize_minmax, apply_minmax_geo
 from utils.vis.event_show import show_event_dual_plot
 from utils.device import get_default_device
 
@@ -46,9 +46,12 @@ lr = 3e-4
 num_epochs = 5
 print_every = 25  # batches per print
 
-# 데이터/정규화 (normalize_sig 방식): log1p + minmax to [-1, 1]
-# npe, firstTime 최댓값은 데이터셋 기준으로 계산 (아래에서 dataset 생성 후 설정)
+# 데이터/정규화: nPE는 clamp 후 minmax만, FirstTime은 clamp 후 log_minmax
+npe_clip = 1000.0
+ftime_clip = 21000.0
 log_min = 0.0
+npe_log_max = float(np.log1p(npe_clip))  # nPE는 minmax만 쓰지만 denormalize 호환용 유지
+ftime_log_max = float(np.log1p(ftime_clip))
 _feature_range = (-1, 1)
 
 # label 정규화: [Energy, ux, uy, X, Y, Z] -> Energy log_minmax, ux/uy identity, X/Y/Z minmax (dataset min/max)
@@ -105,29 +108,9 @@ def _print_label_normalize_config():
         print(f"  [{j}] {name}: {detail}")
 
 
-# h5 경로 및 데이터셋 (정규화 스케일 계산을 위해 먼저 생성)
+# h5 경로 및 데이터셋
 h5_path = "./GENESIS-data/22644_0921_time_shift.h5"
 dataset = H5Dataset(h5_path=h5_path)
-
-# 데이터셋 기준 npe, firstTime 최댓값 (log_minmax 스케일용)
-npe_max = 0.0
-ftime_max = 0.0
-for i in tqdm(range(len(dataset)), desc="sig range", leave=False):
-    sig_i, _, _ = dataset[i]
-    npe_max = max(npe_max, float(sig_i[0].max()))
-    ftime_max = max(ftime_max, float(sig_i[1].max()))
-# log_minmax 분모 0 방지 (전부 0인 경우 대비)
-npe_max = max(npe_max, 1e-6)
-ftime_max = max(ftime_max, 1e-6)
-npe_log_max = float(np.log1p(npe_max))
-ftime_log_max = float(np.log1p(ftime_max))
-print(f"sig data range (dataset): npe_max={npe_max:.4f}, ftime_max={ftime_max:.4f}")
-
-# _channel_stats는 npe_log_max, ftime_log_max 사용 (위에서 설정됨)
-_channel_stats = [
-    {"log_min": log_min, "log_max": npe_log_max},
-    {"log_min": log_min, "log_max": ftime_log_max},
-]
 
 # ---- dataloader ----
 _print_label_normalize_config()
@@ -151,10 +134,15 @@ print("label:", label0.shape, label0.dtype, label0)
 print("geo_min (x,y,z):", geo_min)
 print("geo_max (x,y,z):", geo_max)
 
-# ---- normalization: decorator-wrapped prepare_batch (normalize_sig 동일 방식) ----
-# normalize_sig: log_minmax per channel (data_min=log_min, data_max=npe_log_max/ftime_log_max, feature_range=(-1, 1))
+# ---- normalization: decorator-wrapped prepare_batch ----
+# nPE: clamp [0, npe_clip] 후 minmax to [-1, 1]. FirstTime: clamp 후 log_minmax to [-1, 1]
+_channel_stats = [
+    {"min": 0.0, "max": npe_clip},   # nPE: log 없이 minmax
+    {"log_min": log_min, "log_max": ftime_log_max},
+]
+
 @normalize(
-    channel_methods=["log_minmax", "log_minmax"],
+    channel_methods=["minmax", "log_minmax"],
     feature_ranges=[_feature_range, _feature_range],
     channel_stats=_channel_stats,
     arg_index=0,
@@ -174,15 +162,23 @@ def prepare_batch(
 
 
 def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
-    """정규화된 sig ([-1, 1] log_minmax)를 원 스케일로 역정규화. prepare_batch 출력용."""
+    """정규화된 sig를 원 스케일로 역정규화. nPE는 minmax 역변환, FirstTime은 log_minmax 역변환."""
     out = sig.clone()
     if sig.dim() == 3:
-        out[:, 0, :] = denormalize_log_minmax(sig[:, 0, :], log_min, npe_log_max, _feature_range)
+        out[:, 0, :] = denormalize_minmax(sig[:, 0, :], 0.0, npe_clip, _feature_range)
         out[:, 1, :] = denormalize_log_minmax(sig[:, 1, :], log_min, ftime_log_max, _feature_range)
     else:
-        out[0, :] = denormalize_log_minmax(sig[0, :], log_min, npe_log_max, _feature_range)
+        out[0, :] = denormalize_minmax(sig[0, :], 0.0, npe_clip, _feature_range)
         out[1, :] = denormalize_log_minmax(sig[1, :], log_min, ftime_log_max, _feature_range)
     return out
+
+
+def _clamp_sig(sig: torch.Tensor) -> torch.Tensor:
+    """Clamp npe/ftime before normalize. Returns clamped copy."""
+    s = sig.clone()
+    s[:, 0] = torch.clamp(s[:, 0], min=0.0, max=npe_clip)
+    s[:, 1] = torch.clamp(s[:, 1], min=0.0, max=ftime_clip)
+    return s
 
 
 def sample_timesteps(batch: int, T: int, device: torch.device) -> torch.Tensor:
@@ -426,9 +422,10 @@ for epoch in range(1, num_epochs + 1):
         sig = sig.to(device, non_blocking=True)         # (B, 2, L)
         label = label.to(device, non_blocking=True)     # (B, 6)
 
+        sig_clamp = _clamp_sig(sig)
         if epoch == 1 and batch_idx == 1:
             _label_raw_before = label.clone()
-        x0, label = prepare_batch(sig, label, verbose=(epoch == 1 and batch_idx == 1))  # (B, 2, L) in [-1, 1]
+        x0, label = prepare_batch(sig_clamp, label, verbose=(epoch == 1 and batch_idx == 1))  # (B, 2, L) in [-1, 1]
         if epoch == 1 and batch_idx == 1:
             print("prepare_batch: label (raw, same batch)", _label_raw_before)
             for j in [1, 2]:
@@ -532,7 +529,8 @@ label_np = label_raw.detach().cpu().numpy()
 sig = sig_raw.unsqueeze(0).to(device)  # (1,2,L)
 label = label_raw.unsqueeze(0).to(device)  # (1,6)
 
-x0, label = prepare_batch(sig, label, verbose=True)
+sig_clamp = _clamp_sig(sig)
+x0, label = prepare_batch(sig_clamp, label, verbose=True)
 
 for t_val in [0, 250, 500, 750, 1000]:
     t = torch.tensor([t_val], device=device, dtype=torch.long)
@@ -567,9 +565,9 @@ with torch.no_grad():
     ref_idx = 0
     sig_ref_raw, geo_ref_raw, label_ref_raw = dataset[ref_idx]
     
-    # 실제 데이터 준비 (denormalized 상태로 그림 그리기 위해)
-    sig_ref = sig_ref_raw.unsqueeze(0).to(device)
-    sig_ref_denorm = sig_ref[0].detach().cpu().numpy()
+    # 실제 데이터 준비 (clamp만 적용한 상태로 그림 그리기)
+    sig_ref_clamp = _clamp_sig(sig_ref_raw.unsqueeze(0).to(device))
+    sig_ref_denorm = sig_ref_clamp[0].detach().cpu().numpy()
     geo_ref_np = geo_ref_raw.detach().cpu().numpy()
     label_ref_np = label_ref_raw.detach().cpu().numpy()
     
@@ -593,7 +591,7 @@ with torch.no_grad():
     
     # 샘플링을 위한 label 정규화 (prepare_batch 사용)
     label_ref = label_ref_raw.unsqueeze(0).to(device)  # (1, 6) - raw label
-    _, label_ref_norm = prepare_batch(sig_ref, label_ref, verbose=False)  # label만 정규화
+    _, label_ref_norm = prepare_batch(sig_ref_clamp, label_ref, verbose=False)  # label만 정규화
     
     # 샘플링 파라미터
     num_samples = 1
