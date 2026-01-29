@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
 Training script for GENESIS diffusion model.
-Converted from train.ipynb
 """
 
 import math
 import os
 import sys
 from pathlib import Path
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,10 +14,8 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
-
 # Add GENESIS to path
 sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
-
 from dataloader.h5 import H5Dataset
 from diffusion.schedules import sigmoid_beta_schedule, compute_alpha_schedule
 from diffusion.forward import apply_forward_diffusion
