@@ -11,8 +11,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 import matplotlib.pyplot as plt
 # Add GENESIS to path
 sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
@@ -24,6 +26,11 @@ from utils.vis.event_show import show_event_dual_plot
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("device:", device)
+
+# ---- 출력 폴더 생성 ----
+output_dir = Path("./output")
+output_dir.mkdir(exist_ok=True)
+print(f"Output directory: {output_dir.absolute()}")
 
 # ---- config (원하는대로 바꿔도 됨) ----
 T = 1000
@@ -366,8 +373,13 @@ print("AMP enabled:", scaler is not None)
 
 # torch.compile() 최적화 (PyTorch 2.0+)
 # 모델을 컴파일하여 실행 속도 향상 (약 20-30% 빠름)
+# Triton이 없으면 에러가 발생하므로 안전하게 처리
 try:
     if hasattr(torch, 'compile'):
+        # Triton 없이도 작동하도록 에러 suppress 설정
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
+        
         print("Compiling model with torch.compile()...")
         model = torch.compile(model, mode="reduce-overhead")  # 또는 "max-autotune" (더 느린 컴파일, 더 빠른 실행)
         print("Model compilation successful!")
@@ -375,6 +387,7 @@ try:
         print("torch.compile() not available (requires PyTorch 2.0+)")
 except Exception as e:
     print(f"Model compilation failed (continuing without compile): {e}")
+    print("Note: If Triton is not installed, torch.compile() will fall back to eager mode.")
 
 print("params:", sum(p.numel() for p in model.parameters())/1e6, "M")
 
@@ -385,13 +398,20 @@ loss_hist = []
 steps_per_epoch = len(loader)
 total_steps = num_epochs * steps_per_epoch
 
+# 최고 성능 모델 추적 (loss가 낮을수록 좋음)
+best_loss = float('inf')
+best_checkpoint_path = None
+
 print(f"Training for {num_epochs} epochs ({steps_per_epoch} batches per epoch, {total_steps} total steps)")
 print("="*60)
 
 for epoch in range(1, num_epochs + 1):
     epoch_losses = []
     
-    for batch_idx, (sig, geo, label) in enumerate(loader, 1):
+    # tqdm으로 진행률 표시
+    pbar = tqdm(enumerate(loader, 1), total=steps_per_epoch, desc=f"Epoch {epoch}/{num_epochs}")
+    
+    for batch_idx, (sig, geo, label) in pbar:
         # pin_memory=True일 때 non_blocking으로 전송 속도 향상
         sig = sig.to(device, non_blocking=True)         # (B, 2, L)
         label = label.to(device, non_blocking=True)     # (B, 6)
@@ -413,7 +433,7 @@ for epoch in range(1, num_epochs + 1):
         x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
 
         # AMP: forward pass를 autocast로 감싸기
-        with autocast(enabled=(scaler is not None)):
+        with autocast('cuda', enabled=(scaler is not None)):
             eps_hat = model(x_t, t, label)
             loss = F.mse_loss(eps_hat, noise)
 
@@ -434,15 +454,59 @@ for epoch in range(1, num_epochs + 1):
         loss_hist.append(loss_val)
         epoch_losses.append(loss_val)
 
-        # Print progress
         current_step = (epoch - 1) * steps_per_epoch + batch_idx
+        
+        # 성능이 개선되면 (loss가 낮아지면) 모델 저장
+        if loss_val < best_loss:
+            best_loss = loss_val
+            
+            # 이전 최고 모델 삭제 (선택사항)
+            if best_checkpoint_path is not None and best_checkpoint_path.exists():
+                best_checkpoint_path.unlink()
+            
+            # 새로운 최고 모델 저장
+            best_checkpoint_path = output_dir / f"best_checkpoint_epoch_{epoch:03d}_batch_{batch_idx:05d}_step_{current_step:05d}_loss_{best_loss:.6f}.pt"
+            checkpoint = {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optim.state_dict(),
+                "epoch": epoch,
+                "batch_idx": batch_idx,
+                "step": current_step,
+                "loss": loss_val,
+                "best_loss": best_loss,
+                "betas": betas.cpu(),
+                "alphas": alphas.cpu(),
+                "alphas_cumprod": alphas_cumprod.cpu(),
+                "T": T,
+                "beta_start": beta_start,
+                "beta_end": beta_end,
+                "d_model": model.d_model,
+                "nhead": 8,
+                "depth": 6,
+                "mlp_ratio": 4.0,
+                "label_dim": 6,
+            }
+            torch.save(checkpoint, best_checkpoint_path)
+        
+        # tqdm 업데이트
+        avg_loss_recent = np.mean(epoch_losses[-print_every:]) if len(epoch_losses) >= print_every else np.mean(epoch_losses)
+        pbar.set_postfix({
+            "loss": f"{avg_loss_recent:.6f}", 
+            "step": current_step,
+            "best": f"{best_loss:.6f}"
+        })
+        
+        # Print progress
         if batch_idx % print_every == 0 or batch_idx == steps_per_epoch:
             avg_loss = np.mean(epoch_losses[-print_every:])
-            print(f"epoch {epoch:3d}/{num_epochs} | batch {batch_idx:4d}/{steps_per_epoch} | step {current_step:5d}/{total_steps} | loss {avg_loss:.6f}")
+            save_status = f"NEW BEST!" if loss_val < best_loss else f"best: {best_loss:.6f}"
+            print(f"\nepoch {epoch:3d}/{num_epochs} | batch {batch_idx:4d}/{steps_per_epoch} | step {current_step:5d}/{total_steps} | loss {avg_loss:.6f} | {save_status}")
     
     # Epoch summary
     epoch_avg_loss = np.mean(epoch_losses)
-    print(f"epoch {epoch:3d}/{num_epochs} completed | avg loss: {epoch_avg_loss:.6f}")
+    print(f"\nepoch {epoch:3d}/{num_epochs} completed | avg loss: {epoch_avg_loss:.6f} | best loss: {best_loss:.6f}")
+    if best_checkpoint_path:
+        print(f"Best model saved: {best_checkpoint_path.name}")
     print("-"*60)
 
 print("Training done!")
@@ -469,12 +533,12 @@ for t_val in [0, 250, 500, 750, 1000]:
     # 출력 역정규화 후 시각화 (prepare_batch 출력용 denormalize_sig)
     x_t_denorm = denormalize_sig(x_t)[0].detach().cpu().numpy()
 
-    output_path = f"event_{event_idx}_t_{t_val}.png"
+    output_path = output_dir / f"event_{event_idx}_t_{t_val}.png"
     fig, _ = show_event_dual_plot(
         sig=x_t_denorm,
         geo=geo_np,
         label=label_np,
-        output_path=output_path,
+        output_path=str(output_path),
         figure_size=(18, 8),
         marker_size=8.0,
         show_detector_hull=True,
@@ -503,12 +567,12 @@ with torch.no_grad():
     
     # 실제 데이터 그림 그리기
     print(f"Plotting actual data from index {ref_idx}...")
-    actual_output_path = f"actual_event_{ref_idx}.png"
+    actual_output_path = output_dir / f"actual_event_{ref_idx}.png"
     fig_actual, _ = show_event_dual_plot(
         sig=sig_ref_denorm,
         geo=geo_ref_np,
         label=label_ref_np,
-        output_path=actual_output_path,
+        output_path=str(actual_output_path),
         figure_size=(18, 8),
         marker_size=8.0,
         show_detector_hull=True,
@@ -536,7 +600,7 @@ with torch.no_grad():
         t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
         
         # 모델로 노이즈 예측 (정규화된 label 사용) - AMP 적용
-        with autocast(enabled=(scaler is not None)):
+        with autocast('cuda', enabled=(scaler is not None)):
             eps_hat = model(x, t_batch, label_ref_norm)  # (B, 2, L)
         
         # DDPM 업데이트
@@ -574,12 +638,12 @@ with torch.no_grad():
     
     # 샘플 시각화 및 저장
     print(f"Plotting sampled data using label from index {ref_idx}...")
-    sampled_output_path = f"sampled_event_{ref_idx}.png"
+    sampled_output_path = output_dir / f"sampled_event_{ref_idx}.png"
     fig_sampled, _ = show_event_dual_plot(
         sig=sample_np,
         geo=geo_ref_np,
         label=label_ref_np,
-        output_path=sampled_output_path,
+        output_path=str(sampled_output_path),
         figure_size=(18, 8),
         marker_size=8.0,
         show_detector_hull=True,
@@ -590,15 +654,18 @@ with torch.no_grad():
     )
     print(f"Sampled event saved to: {sampled_output_path}")
 
-# ---- Save model ----
+# ---- Save final model ----
 print("\n" + "="*60)
-print("Saving model...")
+print("Saving final model...")
 print("="*60)
 
-model_save_path = "model_checkpoint.pt"
+model_save_path = output_dir / "model_checkpoint_final.pt"
 checkpoint = {
     "model_state_dict": model.state_dict(),
     "optimizer_state_dict": optim.state_dict(),
+    "epoch": num_epochs,
+    "final_loss": loss_hist[-1] if loss_hist else None,
+    "best_loss": best_loss,
     "betas": betas.cpu(),
     "alphas": alphas.cpu(),
     "alphas_cumprod": alphas_cumprod.cpu(),
@@ -613,5 +680,7 @@ checkpoint = {
 }
 
 torch.save(checkpoint, model_save_path)
-print(f"Model saved to: {model_save_path}")
+print(f"Final model saved to: {model_save_path}")
+if best_checkpoint_path:
+    print(f"Best model (loss={best_loss:.6f}) saved to: {best_checkpoint_path.name}")
 print("Done!")
