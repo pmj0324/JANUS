@@ -1,4 +1,5 @@
 # Training config for DiT diffusion model (train.py)
+# Values match train_exp.py defaults.
 # Usage: python train.py -c train_dit.yaml
 
 model:
@@ -15,24 +16,28 @@ diffusion:
   schedule:
     type: sigmoid
     timesteps: 1000
-    beta_start: 0.0001
-    beta_end: 0.02
+    beta_start: 0.0001   # 1e-4
+    beta_end: 0.02       # 2e-2
 
 training:
   nepochs: 20
-  bsz: 256
-  lr: 0.0003
+  lr: 0.0003             # 3e-4
 
 data:
   loader: h5
   h5_path: ./GENESIS-data/22644_0921_time_shift.h5
   bsz: 256
   shuffle: true
-  num_workers: 0
-  angle_conversion: false
+  num_workers: 32        # train_exp.py default (0 = no multiprocessing)
+  angle_conversion: true
   pin_memory: false
 
 path: ./output/
-device: cuda
+device: cuda             # fallback to mps/cpu if unavailable
 print_every: 50
 compile_model: false
+
+# Normalization (hardcoded in train.py, same as train_exp.py):
+# npe_clip=1000, ftime_clip=21000, feature_range=(-1,1)
+# label: Energy log_minmax, ux/uy identity, X/Y/Z minmax (dataset min/max)
+# geo/label XYZ minmax: from 22644_0921_time_shift.h5
