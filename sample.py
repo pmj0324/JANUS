@@ -308,7 +308,13 @@ def load_model(checkpoint_path: str, device: torch.device):
     return model, betas, alphas, alphas_cumprod, T, dataset
 
 
-def plot_histogram(sig: np.ndarray, output_path: Path, title_suffix: str = ""):
+def plot_histogram(
+    sig: np.ndarray,
+    output_path: Path,
+    title_suffix: str = "",
+    cut_npe: float = 0.0,
+    cut_firsttime: float = 0.0,
+):
     """
     nPE와 FirstTime의 히스토그램을 그려서 저장.
     
@@ -316,13 +322,15 @@ def plot_histogram(sig: np.ndarray, output_path: Path, title_suffix: str = ""):
         sig: (2, L) 형태의 샘플 데이터
         output_path: 저장 경로
         title_suffix: 제목에 추가할 접미사
+        cut_npe: 이 값 이하의 nPE는 히스토그램에 포함하지 않음 (0이면 전부 포함)
+        cut_firsttime: 이 값 이하의 FirstTime은 히스토그램에 포함하지 않음 (0이면 전부 포함)
     """
     npe = sig[0]  # nPE 채널
     ftime = sig[1]  # FirstTime 채널
     
-    # 0이 아닌 값만 필터링 (히스토그램에 의미있는 데이터만)
-    npe_nonzero = npe[npe > 0]
-    ftime_nonzero = ftime[ftime > 0]
+    # cut 이하 제외 (cut이 0이면 기존처럼 0 초과만; cut > 0이면 해당 값 초과만)
+    npe_nonzero = npe[npe > cut_npe]
+    ftime_nonzero = ftime[ftime > cut_firsttime]
     
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
@@ -362,6 +370,16 @@ def plot_histogram(sig: np.ndarray, output_path: Path, title_suffix: str = ""):
     print(f"  Saved histogram: {output_path}")
 
 
+def _apply_cuts(sig: np.ndarray, cut_npe: float, cut_firsttime: float) -> np.ndarray:
+    """cut_npe/cut_firsttime 이하 값을 0으로 만들어 시각화에서 보이지 않게 함. 0이면 변경 없음."""
+    out = sig.copy()
+    if cut_npe > 0:
+        out[0] = np.where(out[0] <= cut_npe, 0.0, out[0])
+    if cut_firsttime > 0:
+        out[1] = np.where(out[1] <= cut_firsttime, 0.0, out[1])
+    return out
+
+
 def sample(
     model: nn.Module,
     label: torch.Tensor,
@@ -377,6 +395,8 @@ def sample(
     geo_np: np.ndarray = None,
     label_np: np.ndarray = None,
     save_histogram: bool = False,
+    cut_npe: float = 0.0,
+    cut_firsttime: float = 0.0,
 ):
     """DDPM 역확산을 통한 샘플링."""
     if device is None:
@@ -461,11 +481,12 @@ def sample(
             np.save(np_output_path, sample_np)
             print(f"  Saved numpy: {np_output_path}")
             
-            # 이미지 저장 (geo와 label이 있을 때만)
+            # 이미지 저장 (geo와 label이 있을 때만) — cut 적용 시 해당 값 이하는 미표시
             if geo_np is not None and label_np is not None:
+                sig_vis = _apply_cuts(sample_np, cut_npe, cut_firsttime)
                 img_output_path = output_dir / f"sampled_event_{ref_idx}_sample_{i+1:03d}.png"
                 fig_sampled, _ = show_event_dual_plot(
-                    sig=sample_np,
+                    sig=sig_vis,
                     geo=geo_np,
                     label=label_np,
                     output_path=str(img_output_path),
@@ -479,10 +500,13 @@ def sample(
                 )
                 print(f"  Saved image: {img_output_path}")
             
-            # 히스토그램 저장
+            # 히스토그램 저장 (cut 적용 시 해당 값 이하는 히스토그램에서 제외)
             if save_histogram:
                 hist_output_path = output_dir / f"sampled_event_{ref_idx}_sample_{i+1:03d}_histogram.png"
-                plot_histogram(sample_np, hist_output_path, title_suffix=f" (Sample #{i+1})")
+                plot_histogram(
+                    sample_np, hist_output_path, title_suffix=f" (Sample #{i+1})",
+                    cut_npe=cut_npe, cut_firsttime=cut_firsttime,
+                )
         
         saved_samples.append(sample_np)
     
@@ -499,6 +523,8 @@ def main():
     parser.add_argument("--label", type=str, default=None, help="Custom label as comma-separated values: Energy,ux,uy,X,Y,Z")
     parser.add_argument("--gpu", type=int, default=None, help="GPU ID to use (default: auto-select free GPU)")
     parser.add_argument("--histogram", action="store_true", help="Save histogram plots for each sample")
+    parser.add_argument("--cut_npe", type=float, default=0.0, help="nPE cut: values <= this are hidden in plots/histogram (default: 0 = show all)")
+    parser.add_argument("--cut_firsttime", type=float, default=0.0, help="FirstTime cut: values <= this are hidden in plots/histogram (default: 0 = show all)")
     
     args = parser.parse_args()
     
@@ -548,9 +574,10 @@ def main():
         sig_ref_clamp = _clamp_sig(sig_ref_raw.unsqueeze(0).to(device))
         sig_ref_denorm = sig_ref_clamp[0].detach().cpu().numpy()  # clamp만 적용된 상태
         
+        sig_actual_vis = _apply_cuts(sig_ref_denorm, args.cut_npe, args.cut_firsttime)
         actual_output_path = output_dir / f"actual_event_{ref_idx}.png"
         fig_actual, _ = show_event_dual_plot(
-            sig=sig_ref_denorm,
+            sig=sig_actual_vis,
             geo=geo_np,
             label=label_np,
             output_path=str(actual_output_path),
@@ -564,10 +591,13 @@ def main():
         )
         print(f"Actual data saved to: {actual_output_path}")
         
-        # 원본 히스토그램도 저장 (옵션이 켜져있을 때)
+        # 원본 히스토그램도 저장 (옵션이 켜져있을 때, cut 적용)
         if args.histogram:
             actual_hist_path = output_dir / f"actual_event_{ref_idx}_histogram.png"
-            plot_histogram(sig_ref_denorm, actual_hist_path, title_suffix=" (Actual)")
+            plot_histogram(
+                sig_ref_denorm, actual_hist_path, title_suffix=" (Actual)",
+                cut_npe=args.cut_npe, cut_firsttime=args.cut_firsttime,
+            )
         
         del sig_ref_clamp, sig_ref_denorm
     
@@ -587,6 +617,8 @@ def main():
         geo_np=geo_np,
         label_np=label_np,
         save_histogram=args.histogram,
+        cut_npe=args.cut_npe,
+        cut_firsttime=args.cut_firsttime,
     )
     
     print("Done!")
