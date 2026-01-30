@@ -156,8 +156,21 @@ def main():
     with open(args.config, "r") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
-    # Device (use utils.device when not in config)
-    device = torch.device(config["device"]) if config.get("device") else get_default_device()
+    # Device: use config if requested and available, else fall back to best available
+    requested = config.get("device")
+    if requested:
+        try:
+            dev = torch.device(requested)
+            if dev.type == "cuda" and not torch.cuda.is_available():
+                raise AssertionError("CUDA not available")
+            if dev.type == "mps" and (not getattr(torch.backends, "mps", None) or not torch.backends.mps.is_available()):
+                raise AssertionError("MPS not available")
+            device = dev
+        except (AssertionError, RuntimeError) as e:
+            device = get_default_device()
+            print(f"Requested device '{requested}' not available ({e}), using: {device}")
+    else:
+        device = get_default_device()
     print("device:", device)
 
     # Output dir
@@ -263,8 +276,8 @@ def main():
     # Optional torch.compile
     if config.get("compile_model", False) and hasattr(torch, "compile"):
         try:
-            import torch._dynamo
-            torch._dynamo.config.suppress_errors = True
+            import torch._dynamo as _dynamo
+            _dynamo.config.suppress_errors = True
             print("Compiling model with torch.compile()...")
             model = torch.compile(model, mode="reduce-overhead")
             print("Model compilation successful!")
