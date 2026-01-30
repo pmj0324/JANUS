@@ -196,7 +196,8 @@ def main():
     val_ratio = config.get("val_ratio", 0.05)
     n_val = max(1, int(n_total * val_ratio))
     n_train = n_total - n_val
-    gen = torch.Generator().manual_seed(seed)
+    # Use __import__ to avoid UnboundLocalError if 'torch' is shadowed elsewhere in main()
+    gen = __import__("torch").Generator().manual_seed(seed)
     train_ds, val_ds = random_split(dataset, [n_train, n_val], generator=gen)
     print(f"Train size: {n_train}, Val size: {n_val}")
 
