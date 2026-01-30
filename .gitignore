@@ -77,13 +77,16 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
-tasks/*/
-outputs/
-checkpoints/
-logs/
-dev-logs/
+/tasks/
+/outputs/
+/checkpoints/
+/logs/
+/dev-logs/
 *.h5
 *.npz
+*.npy
+*.pt
+*.pth
 *.png
 *.jpg
 *.jpeg
@@ -99,8 +102,5 @@ dev-logs/
 
 # Data files (uncomment if you don't want to track data)
 .diffusion_analysis/
-# GENESIS-data/ -    
 GENESIS-data/*
 !GENESIS-data/.gitkeep
-# data/
-# datasets/
