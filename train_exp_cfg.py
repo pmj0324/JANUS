@@ -155,6 +155,9 @@ def _compute_val_loss(model, val_loader, betas, T, device, prepare_batch, _clamp
 
 
 def main():
+    # Explicitly import torch at function start to avoid UnboundLocalError
+    import torch
+    
     parser = argparse.ArgumentParser(description="Train GENESIS with CFG, val loss, seed, YAML config")
     parser.add_argument("-c", "--config", type=str, required=True, help="Path to YAML config")
     args = parser.parse_args()
