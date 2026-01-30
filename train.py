@@ -23,7 +23,7 @@ try:
 except ImportError:
     from torch.cuda.amp import GradScaler
 
-import dataloader
+from dataloader.h5 import H5Dataset
 from diffusion.schedules import get_noise_schedule, compute_alpha_schedule
 from diffusion.forward import apply_forward_diffusion
 from models import DiffusionDiTTransformer
@@ -57,32 +57,46 @@ GEO_XYZ_MINMAX = [
 ]
 
 
-def _build_normalize_config():
-    ftime_log_max = float(np.log1p(FTIME_CLIP))
-    energy_log_min = float(np.log1p(ENERGY_PEV_MINMAX["min"]))
-    energy_log_max = float(np.log1p(ENERGY_PEV_MINMAX["max"]))
-    channel_stats = [
-        {"min": 0.0, "max": NPE_CLIP},
-        {"log_min": LOG_MIN, "log_max": ftime_log_max},
-    ]
-    label_stats = [
-        {"log_min": energy_log_min, "log_max": energy_log_max},
-        {},
-        {},
-        LABEL_XYZ_MINMAX[0],
-        LABEL_XYZ_MINMAX[1],
-        LABEL_XYZ_MINMAX[2],
-    ]
-    return channel_stats, label_stats
+# Module-level normalize config (same structure as train_exp.py)
+_FTIME_LOG_MAX = float(np.log1p(FTIME_CLIP))
+_ENERGY_LOG_MIN = float(np.log1p(ENERGY_PEV_MINMAX["min"]))
+_ENERGY_LOG_MAX = float(np.log1p(ENERGY_PEV_MINMAX["max"]))
+_CHANNEL_STATS = [
+    {"min": 0.0, "max": NPE_CLIP},
+    {"log_min": LOG_MIN, "log_max": _FTIME_LOG_MAX},
+]
+_LABEL_STATS = [
+    {"log_min": _ENERGY_LOG_MIN, "log_max": _ENERGY_LOG_MAX},
+    {},
+    {},
+    LABEL_XYZ_MINMAX[0],
+    LABEL_XYZ_MINMAX[1],
+    LABEL_XYZ_MINMAX[2],
+]
+
+
+@normalize(
+    channel_methods=["minmax", "log_minmax"],
+    feature_ranges=[FEATURE_RANGE, FEATURE_RANGE],
+    channel_stats=_CHANNEL_STATS,
+    arg_index=0,
+    label_arg_index=1,
+    label_methods=LABEL_METHODS,
+    label_feature_ranges=LABEL_FEATURE_RANGES,
+    label_stats=_LABEL_STATS,
+)
+def prepare_batch(sig: torch.Tensor, label: torch.Tensor, *, verbose: bool = False):
+    if verbose:
+        print("prepare_batch: label", label)
+    return (sig, label)
 
 
 def _print_label_normalize_config():
-    channel_stats, label_stats = _build_normalize_config()
     print("label normalize (per column):")
     for j, name in enumerate(LABEL_NAMES):
         m = LABEL_METHODS[j]
         fr = LABEL_FEATURE_RANGES[j]
-        st = label_stats[j] if j < len(label_stats) else {}
+        st = _LABEL_STATS[j] if j < len(_LABEL_STATS) else {}
         if m == "identity":
             detail = "identity (no transform)"
         elif m == "log_minmax":
@@ -92,28 +106,6 @@ def _print_label_normalize_config():
         else:
             detail = f"{m} -> {fr}  stats={st}"
         print(f"  [{j}] {name}: {detail}")
-
-
-def build_prepare_batch():
-    """Build prepare_batch using utils.normalize decorator."""
-    channel_stats, label_stats = _build_normalize_config()
-
-    @normalize(
-        channel_methods=["minmax", "log_minmax"],
-        feature_ranges=[FEATURE_RANGE, FEATURE_RANGE],
-        channel_stats=channel_stats,
-        arg_index=0,
-        label_arg_index=1,
-        label_methods=LABEL_METHODS,
-        label_feature_ranges=LABEL_FEATURE_RANGES,
-        label_stats=label_stats,
-    )
-    def prepare_batch(sig: torch.Tensor, label: torch.Tensor, *, verbose: bool = False):
-        if verbose:
-            print("prepare_batch: label", label)
-        return (sig, label)
-
-    return prepare_batch
 
 
 def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
@@ -183,7 +175,7 @@ def main():
     data_cfg = config["data"]
     loader_type = data_cfg.get("loader", "h5")
     if loader_type in ["h5", "hdf5"]:
-        dataset = dataloader.H5Dataset(
+        dataset = H5Dataset(
             h5_path=data_cfg["h5_path"],
             angle_conversion=data_cfg.get("angle_conversion", False),
             num_workers=data_cfg.get("num_workers"),
@@ -234,12 +226,9 @@ def main():
     alpha_schedule = compute_alpha_schedule(betas)
     alphas = alpha_schedule["alphas"]
     alphas_cumprod = alpha_schedule["alphas_cumprod"]
-    del alpha_schedule  # free unused schedule tensors (sqrt_*, etc.) to reduce GPU memory
     T = timesteps
     print("schedule:", schedule_type, "timesteps:", T, "betas range:", betas.min().item(), betas.max().item())
 
-    # Normalization & prepare_batch
-    prepare_batch = build_prepare_batch()
     geo_min = np.array([GEO_XYZ_MINMAX[j]["min"] for j in range(3)], dtype=np.float32)
     geo_max = np.array([GEO_XYZ_MINMAX[j]["max"] for j in range(3)], dtype=np.float32)
 
@@ -314,9 +303,6 @@ def main():
             label = label.to(device, non_blocking=True)
             sig_clamp = clamp_sig(sig)
             x0, label_norm = prepare_batch(sig_clamp, label, verbose=(epoch == 1 and batch_idx == 1))
-            # Release batch copy kept by normalize decorator to reduce GPU memory
-            if hasattr(prepare_batch, "_original_data"):
-                prepare_batch._original_data = None
 
             B = x0.shape[0]
             t = sample_timesteps(B, T, device)
@@ -340,8 +326,6 @@ def main():
                 optim.step()
 
             loss_val = float(loss.item())
-            # Free large tensors so GC can reclaim GPU memory before next batch
-            del sig, sig_clamp, x0, label_norm, t, noise, x_t, eps_hat, loss
             loss_hist.append(loss_val)
             epoch_losses.append(loss_val)
             current_step = (epoch - 1) * steps_per_epoch + batch_idx
@@ -384,8 +368,6 @@ def main():
             )
 
         epoch_avg = np.mean(epoch_losses)
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
         print(f"\nepoch {epoch:3d}/{num_epochs} completed | avg loss: {epoch_avg:.6f} | best loss: {best_loss:.6f}")
         if best_checkpoint_path:
             print("Best model saved:", best_checkpoint_path.name)
