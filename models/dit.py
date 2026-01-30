@@ -6,6 +6,7 @@ DiT-style Transformer for diffusion (conditional on timestep + label).
 import math
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 
 def sinusoidal_timestep_embedding(
@@ -99,9 +100,11 @@ class DiffusionDiTTransformer(nn.Module):
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
         label_dim: int = 6,
+        use_checkpointing: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
+        self.use_checkpointing = use_checkpointing
         if geo.dim() == 2:
             geo_tok = geo.transpose(0, 1).unsqueeze(0)
         elif geo.dim() == 3:
@@ -158,7 +161,10 @@ class DiffusionDiTTransformer(nn.Module):
         t_emb = sinusoidal_timestep_embedding(t, self.d_model)
         c = self.time_mlp(t_emb) + self.label_mlp(label)
         for blk in self.blocks:
-            h = blk(h, c)
+            if self.use_checkpointing and self.training:
+                h = checkpoint(blk, h, c, use_reentrant=False)
+            else:
+                h = blk(h, c)
         shift, scale = self.final_ada(c).chunk(2, dim=-1)
         h = self.final_norm(h)
         h = h * (1.0 + scale[:, None, :]) + shift[:, None, :]

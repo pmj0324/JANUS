@@ -6,7 +6,6 @@ utils.device, utils.vis, models.dit.
 """
 
 import argparse
-import multiprocessing
 from pathlib import Path
 
 import numpy as np
@@ -189,11 +188,7 @@ def main():
     shuffle = dataset.shuffle if dataset.shuffle is not None else data_cfg.get("shuffle", True)
     pin_memory = data_cfg.get("pin_memory", device.type == "cuda")
 
-    # CUDA + num_workers > 0: use 'spawn' so workers don't inherit CUDA context (avoids GPU OOM from fork)
-    multiprocessing_context = None
-    if num_workers > 0 and device.type == "cuda":
-        multiprocessing_context = multiprocessing.get_context("spawn")
-
+    # train_exp.py와 동일: multiprocessing_context 미설정 → Linux 기본 fork 사용 (데이터셋 pickle 없음)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -203,7 +198,6 @@ def main():
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
         prefetch_factor=2 if num_workers > 0 else None,
-        multiprocessing_context=multiprocessing_context,
     )
     print("dataset length:", len(dataset))
     _print_label_normalize_config()
@@ -245,8 +239,10 @@ def main():
     dropout = opts.get("dropout", 0.0)
     label_dim = opts.get("label_dim", 6)
 
+    # train_exp.py와 동일: dataset[0][1]로 geo 사용 (fork 시 pickle 없음)
     geo_raw = dataset[0][1]
     geo_norm = apply_minmax_geo(geo_raw, geo_min, geo_max, feature_range=(0, 1))
+    use_checkpointing = opts.get("use_checkpointing", True)
     model = DiffusionDiTTransformer(
         geo=geo_norm,
         d_model=d_model,
@@ -255,6 +251,7 @@ def main():
         mlp_ratio=mlp_ratio,
         dropout=dropout,
         label_dim=label_dim,
+        use_checkpointing=use_checkpointing,
     ).to(device)
 
     if device.type == "cuda":

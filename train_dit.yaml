@@ -11,6 +11,7 @@ model:
     mlp_ratio: 4.0
     dropout: 0.0
     label_dim: 6
+    use_checkpointing: true   # saves GPU memory (slower); set false if GPU has enough VRAM
 
 diffusion:
   schedule:
@@ -35,7 +36,7 @@ data:
 path: ./output/
 device: cuda             # fallback to mps/cpu if unavailable
 print_every: 50
-compile_model: false
+compile_model: true   # train_exp.py는 항상 compile 시도; compile 시 메모리·속도 개선
 
 # Normalization (hardcoded in train.py, same as train_exp.py):
 # npe_clip=1000, ftime_clip=21000, feature_range=(-1,1)
