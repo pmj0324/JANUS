@@ -328,40 +328,40 @@ def plot_histogram(
     npe = sig[0]  # nPE 채널
     ftime = sig[1]  # FirstTime 채널
     
-    # cut 이하 제외 (cut이 0이면 기존처럼 0 초과만; cut > 0이면 해당 값 초과만)
-    npe_nonzero = npe[npe > cut_npe]
-    ftime_nonzero = ftime[ftime > cut_firsttime]
+    # cut 이하 제외. cut=0(디폴트)이면 전부 포함, cut>0이면 해당 값 초과만
+    npe_for_hist = npe if cut_npe == 0 else npe[npe > cut_npe]
+    ftime_for_hist = ftime if cut_firsttime == 0 else ftime[ftime > cut_firsttime]
     
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
     # nPE 히스토그램
     ax1 = axes[0]
-    if len(npe_nonzero) > 0:
-        ax1.hist(npe_nonzero, bins=50, alpha=0.7, color='blue', edgecolor='black')
+    if len(npe_for_hist) > 0:
+        ax1.hist(npe_for_hist, bins=50, alpha=0.7, color='blue', edgecolor='black')
         ax1.set_xlabel('nPE')
         ax1.set_ylabel('Frequency')
-        ax1.set_title(f'nPE Distribution{title_suffix}')
+        ax1.set_title(f'nPE Distribution{title_suffix}' + (f' (cut>{cut_npe})' if cut_npe > 0 else ''))
         ax1.grid(True, alpha=0.3)
-        ax1.axvline(npe_nonzero.mean(), color='red', linestyle='--', label=f'Mean: {npe_nonzero.mean():.2f}')
-        ax1.axvline(np.median(npe_nonzero), color='green', linestyle='--', label=f'Median: {np.median(npe_nonzero):.2f}')
+        ax1.axvline(npe_for_hist.mean(), color='red', linestyle='--', label=f'Mean: {npe_for_hist.mean():.2f}')
+        ax1.axvline(np.median(npe_for_hist), color='green', linestyle='--', label=f'Median: {np.median(npe_for_hist):.2f}')
         ax1.legend()
     else:
-        ax1.text(0.5, 0.5, 'No non-zero nPE values', ha='center', va='center', transform=ax1.transAxes)
+        ax1.text(0.5, 0.5, 'No nPE values above cut', ha='center', va='center', transform=ax1.transAxes)
         ax1.set_title(f'nPE Distribution{title_suffix} (empty)')
     
     # FirstTime 히스토그램
     ax2 = axes[1]
-    if len(ftime_nonzero) > 0:
-        ax2.hist(ftime_nonzero, bins=50, alpha=0.7, color='orange', edgecolor='black')
+    if len(ftime_for_hist) > 0:
+        ax2.hist(ftime_for_hist, bins=50, alpha=0.7, color='orange', edgecolor='black')
         ax2.set_xlabel('FirstTime')
         ax2.set_ylabel('Frequency')
-        ax2.set_title(f'FirstTime Distribution{title_suffix}')
+        ax2.set_title(f'FirstTime Distribution{title_suffix}' + (f' (cut>{cut_firsttime})' if cut_firsttime > 0 else ''))
         ax2.grid(True, alpha=0.3)
-        ax2.axvline(ftime_nonzero.mean(), color='red', linestyle='--', label=f'Mean: {ftime_nonzero.mean():.2f}')
-        ax2.axvline(np.median(ftime_nonzero), color='green', linestyle='--', label=f'Median: {np.median(ftime_nonzero):.2f}')
+        ax2.axvline(ftime_for_hist.mean(), color='red', linestyle='--', label=f'Mean: {ftime_for_hist.mean():.2f}')
+        ax2.axvline(np.median(ftime_for_hist), color='green', linestyle='--', label=f'Median: {np.median(ftime_for_hist):.2f}')
         ax2.legend()
     else:
-        ax2.text(0.5, 0.5, 'No non-zero FirstTime values', ha='center', va='center', transform=ax2.transAxes)
+        ax2.text(0.5, 0.5, 'No FirstTime values above cut', ha='center', va='center', transform=ax2.transAxes)
         ax2.set_title(f'FirstTime Distribution{title_suffix} (empty)')
     
     plt.tight_layout()
