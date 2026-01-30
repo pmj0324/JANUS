@@ -6,6 +6,7 @@ utils.device, utils.vis, models.dit.
 """
 
 import argparse
+import multiprocessing
 from pathlib import Path
 
 import numpy as np
@@ -23,8 +24,8 @@ except ImportError:
     from torch.cuda.amp import GradScaler
 
 import dataloader
-import diffusion
 from diffusion.schedules import get_noise_schedule, compute_alpha_schedule
+from diffusion.forward import apply_forward_diffusion
 from models import DiffusionDiTTransformer
 from utils.device import get_default_device
 from utils.normalize import (
@@ -196,6 +197,11 @@ def main():
     shuffle = dataset.shuffle if dataset.shuffle is not None else data_cfg.get("shuffle", True)
     pin_memory = data_cfg.get("pin_memory", device.type == "cuda")
 
+    # CUDA + num_workers > 0: use 'spawn' so workers don't inherit CUDA context (avoids GPU OOM from fork)
+    multiprocessing_context = None
+    if num_workers > 0 and device.type == "cuda":
+        multiprocessing_context = multiprocessing.get_context("spawn")
+
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -205,6 +211,7 @@ def main():
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
         prefetch_factor=2 if num_workers > 0 else None,
+        multiprocessing_context=multiprocessing_context,
     )
     print("dataset length:", len(dataset))
     _print_label_normalize_config()
@@ -227,6 +234,7 @@ def main():
     alpha_schedule = compute_alpha_schedule(betas)
     alphas = alpha_schedule["alphas"]
     alphas_cumprod = alpha_schedule["alphas_cumprod"]
+    del alpha_schedule  # free unused schedule tensors (sqrt_*, etc.) to reduce GPU memory
     T = timesteps
     print("schedule:", schedule_type, "timesteps:", T, "betas range:", betas.min().item(), betas.max().item())
 
@@ -306,11 +314,14 @@ def main():
             label = label.to(device, non_blocking=True)
             sig_clamp = clamp_sig(sig)
             x0, label_norm = prepare_batch(sig_clamp, label, verbose=(epoch == 1 and batch_idx == 1))
+            # Release batch copy kept by normalize decorator to reduce GPU memory
+            if hasattr(prepare_batch, "_original_data"):
+                prepare_batch._original_data = None
 
             B = x0.shape[0]
             t = sample_timesteps(B, T, device)
             noise = torch.randn_like(x0)
-            x_t = diffusion.apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
+            x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
 
             with autocast(device.type, enabled=(scaler is not None)):
                 eps_hat = model(x_t, t, label_norm)
@@ -329,6 +340,8 @@ def main():
                 optim.step()
 
             loss_val = float(loss.item())
+            # Free large tensors so GC can reclaim GPU memory before next batch
+            del sig, sig_clamp, x0, label_norm, t, noise, x_t, eps_hat, loss
             loss_hist.append(loss_val)
             epoch_losses.append(loss_val)
             current_step = (epoch - 1) * steps_per_epoch + batch_idx
@@ -371,6 +384,8 @@ def main():
             )
 
         epoch_avg = np.mean(epoch_losses)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         print(f"\nepoch {epoch:3d}/{num_epochs} completed | avg loss: {epoch_avg:.6f} | best loss: {best_loss:.6f}")
         if best_checkpoint_path:
             print("Best model saved:", best_checkpoint_path.name)
@@ -392,7 +407,7 @@ def main():
     for t_val in [0, 250, 500, 750, 1000]:
         t = torch.tensor([t_val], device=device, dtype=torch.long)
         noise = torch.randn_like(x0)
-        x_t = diffusion.apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
+        x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
         x_t_denorm = denormalize_sig(x_t)[0].detach().cpu().numpy()
         out_path = output_dir / f"event_{event_idx}_t_{t_val}.png"
         show_event_dual_plot(
