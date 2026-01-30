@@ -1,189 +1,496 @@
-import torch as th
+#!/usr/bin/env python3
+"""
+Training script for GENESIS diffusion model.
+Uses config YAML and project modules: dataloader, diffusion, utils.normalize,
+utils.device, utils.vis, models.dit.
+"""
+
 import argparse
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import yaml
+from torch.amp import autocast
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+try:
+    from torch.amp import GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler
+
 import dataloader
 import diffusion
-from diffusion.schedules import (
-    linear_beta_schedule,
-    cosine_beta_schedule,
-    quadratic_beta_schedule,
-    sigmoid_beta_schedule,
+from diffusion.schedules import get_noise_schedule, compute_alpha_schedule
+from models import DiffusionDiTTransformer
+from utils.device import get_default_device
+from utils.normalize import (
+    normalize,
+    denormalize_minmax,
+    denormalize_log_minmax,
+    apply_minmax_geo,
 )
+from utils.vis.event_show import show_event_dual_plot
 
-if __name__ == '__main__':
+# ---- Normalization defaults (train_exp behavior) ----
+NPE_CLIP = 1000.0
+FTIME_CLIP = 21000.0
+LOG_MIN = 0.0
+FEATURE_RANGE = (-1, 1)
+LABEL_NAMES = ["Energy (PeV)", "ux", "uy", "X", "Y", "Z"]
+LABEL_METHODS = ["log_minmax", "identity", "identity", "minmax", "minmax", "minmax"]
+LABEL_FEATURE_RANGES = [FEATURE_RANGE] * 6
+ENERGY_PEV_MINMAX = {"min": 1.0, "max": 100.0}
+LABEL_XYZ_MINMAX = [
+    {"min": -570.9000244140625, "max": 576.3699951171875},
+    {"min": -521.0800170898438, "max": 509.5},
+    {"min": -509.8599853515625, "max": 506.0566711425781},
+]
+GEO_XYZ_MINMAX = [
+    {"min": -570.9000244140625, "max": 576.3699951171875},
+    {"min": -521.0800170898438, "max": 509.5},
+    {"min": -509.8599853515625, "max": 506.0566711425781},
+]
+
+
+def _build_normalize_config():
+    ftime_log_max = float(np.log1p(FTIME_CLIP))
+    energy_log_min = float(np.log1p(ENERGY_PEV_MINMAX["min"]))
+    energy_log_max = float(np.log1p(ENERGY_PEV_MINMAX["max"]))
+    channel_stats = [
+        {"min": 0.0, "max": NPE_CLIP},
+        {"log_min": LOG_MIN, "log_max": ftime_log_max},
+    ]
+    label_stats = [
+        {"log_min": energy_log_min, "log_max": energy_log_max},
+        {},
+        {},
+        LABEL_XYZ_MINMAX[0],
+        LABEL_XYZ_MINMAX[1],
+        LABEL_XYZ_MINMAX[2],
+    ]
+    return channel_stats, label_stats
+
+
+def _print_label_normalize_config():
+    channel_stats, label_stats = _build_normalize_config()
+    print("label normalize (per column):")
+    for j, name in enumerate(LABEL_NAMES):
+        m = LABEL_METHODS[j]
+        fr = LABEL_FEATURE_RANGES[j]
+        st = label_stats[j] if j < len(label_stats) else {}
+        if m == "identity":
+            detail = "identity (no transform)"
+        elif m == "log_minmax":
+            detail = f"log_minmax -> {fr}  stats={st}"
+        elif m == "minmax":
+            detail = f"minmax -> {fr}  stats={st} (dataset min/max)" if st else f"minmax -> {fr}  stats={st}"
+        else:
+            detail = f"{m} -> {fr}  stats={st}"
+        print(f"  [{j}] {name}: {detail}")
+
+
+def build_prepare_batch():
+    """Build prepare_batch using utils.normalize decorator."""
+    channel_stats, label_stats = _build_normalize_config()
+
+    @normalize(
+        channel_methods=["minmax", "log_minmax"],
+        feature_ranges=[FEATURE_RANGE, FEATURE_RANGE],
+        channel_stats=channel_stats,
+        arg_index=0,
+        label_arg_index=1,
+        label_methods=LABEL_METHODS,
+        label_feature_ranges=LABEL_FEATURE_RANGES,
+        label_stats=label_stats,
+    )
+    def prepare_batch(sig: torch.Tensor, label: torch.Tensor, *, verbose: bool = False):
+        if verbose:
+            print("prepare_batch: label", label)
+        return (sig, label)
+
+    return prepare_batch
+
+
+def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
+    """정규화된 sig를 원 스케일로 역정규화."""
+    out = sig.clone()
+    if sig.dim() == 3:
+        out[:, 0, :] = denormalize_minmax(sig[:, 0, :], 0.0, NPE_CLIP, FEATURE_RANGE)
+        out[:, 1, :] = denormalize_log_minmax(
+            sig[:, 1, :], LOG_MIN, float(np.log1p(FTIME_CLIP)), FEATURE_RANGE
+        )
+    else:
+        out[0, :] = denormalize_minmax(sig[0, :], 0.0, NPE_CLIP, FEATURE_RANGE)
+        out[1, :] = denormalize_log_minmax(
+            sig[1, :], LOG_MIN, float(np.log1p(FTIME_CLIP)), FEATURE_RANGE
+        )
+    return out
+
+
+def clamp_sig(sig: torch.Tensor) -> torch.Tensor:
+    """Clamp npe/ftime before normalize."""
+    s = sig.clone()
+    if s.dim() == 3:
+        s[:, 0, :] = torch.clamp(s[:, 0, :], min=0.0, max=NPE_CLIP)
+        s[:, 1, :] = torch.clamp(s[:, 1, :], min=0.0, max=FTIME_CLIP)
+    else:
+        s[0, :] = torch.clamp(s[0, :], min=0.0, max=NPE_CLIP)
+        s[1, :] = torch.clamp(s[1, :], min=0.0, max=FTIME_CLIP)
+    return s
+
+
+def sample_timesteps(batch: int, T: int, device: torch.device) -> torch.Tensor:
+    """t in [1, T] (t=0 제외)."""
+    return torch.randint(low=1, high=T + 1, size=(batch,), device=device, dtype=torch.long)
+
+
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--config", type=str, required=True)
+    parser.add_argument("-c", "--config", type=str, required=True, help="Path to YAML config")
     args = parser.parse_args()
 
-    # Bring the config file
-    config = yaml.load(open(args.config, "r"), Loader=yaml.FullLoader)
+    with open(args.config, "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
 
-    # Create dataset based on loader type
-    loader_type = config["data"]["loader"]
+    # Device (use utils.device when not in config)
+    device = torch.device(config["device"]) if config.get("device") else get_default_device()
+    print("device:", device)
+
+    # Output dir
+    output_dir = Path(config.get("path", "./output"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print("Output directory:", output_dir.absolute())
+
+    # Data
+    data_cfg = config["data"]
+    loader_type = data_cfg.get("loader", "h5")
     if loader_type in ["h5", "hdf5"]:
         dataset = dataloader.H5Dataset(
-            h5_path=config["data"]["h5_path"],
-            angle_conversion=config["data"].get("angle_conversion", False),
-            num_workers=config["data"].get("num_workers"),
-            shuffle=config["data"].get("shuffle"),
+            h5_path=data_cfg["h5_path"],
+            angle_conversion=data_cfg.get("angle_conversion", False),
+            num_workers=data_cfg.get("num_workers"),
+            shuffle=data_cfg.get("shuffle"),
         )
     else:
         raise ValueError(f"Unsupported loader: {loader_type}")
 
-    # Create DataLoader
-    # Use dataset's num_workers and shuffle if provided, otherwise use config
-    data_loader = th.utils.data.DataLoader(
+    batch_size = data_cfg.get("bsz", 256)
+    num_workers = data_cfg.get("num_workers", 0) or 0
+    shuffle = dataset.shuffle if dataset.shuffle is not None else data_cfg.get("shuffle", True)
+    pin_memory = data_cfg.get("pin_memory", device.type == "cuda")
+
+    loader = DataLoader(
         dataset,
-        batch_size=config["data"]["bsz"],
-        shuffle=dataset.shuffle if dataset.shuffle is not None else config["data"].get("shuffle", False),
-        num_workers=dataset.num_workers if dataset.num_workers is not None else config["data"].get("num_workers", 0),
-        pin_memory=config["data"].get("pin_memory", False),
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        drop_last=True,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
+    print("dataset length:", len(dataset))
+    _print_label_normalize_config()
 
+    # Diffusion schedule
+    diff_cfg = config.get("diffusion", {})
+    schedule_cfg = diff_cfg.get("schedule", {})
+    schedule_type = schedule_cfg.get("type", "sigmoid")
+    timesteps = schedule_cfg.get("timesteps", 1000)
+    beta_start = schedule_cfg.get("beta_start", 1e-4)
+    beta_end = schedule_cfg.get("beta_end", 2e-2)
 
-    # for batch in data_loader:
-    #     sig, geo, label = batch
-    #     print(f"Signal shape: {sig.shape}")     # (B, 2, L)
-    #     print(f"Signal : sig[0] = {sig[0]}")
-    #     print(f"Geometry shape: {geo.shape}")    # (B, 3, L)
-    #     print(f"Geometry : geo[0] = {geo[0]}")
-    #     print(f"Label shape: {label.shape}")     # (B, 6)
-    #     print(f"Label : label[0] = {label[0]}")
-    #     break
+    betas = get_noise_schedule(
+        schedule_type,
+        timesteps=timesteps,
+        beta_start=beta_start,
+        beta_end=beta_end,
+        **{k: v for k, v in schedule_cfg.items() if k not in ("type", "timesteps", "beta_start", "beta_end")}
+    ).to(device)
+    alpha_schedule = compute_alpha_schedule(betas)
+    alphas = alpha_schedule["alphas"]
+    alphas_cumprod = alpha_schedule["alphas_cumprod"]
+    T = timesteps
+    print("schedule:", schedule_type, "timesteps:", T, "betas range:", betas.min().item(), betas.max().item())
 
-    # print("Done")
+    # Normalization & prepare_batch
+    prepare_batch = build_prepare_batch()
+    geo_min = np.array([GEO_XYZ_MINMAX[j]["min"] for j in range(3)], dtype=np.float32)
+    geo_max = np.array([GEO_XYZ_MINMAX[j]["max"] for j in range(3)], dtype=np.float32)
 
-    
-    # Get diffusion configuration
-    diffusion_config = config.get("diffusion", {})
-    schedule_config = diffusion_config.get("schedule", {})
-    
-    # Step 1: Check if schedule type is declared
-    if "type" not in schedule_config:
-        raise ValueError(
-            "Schedule type is not specified in config. "
-            "Please add 'type' field in diffusion.schedule (e.g., 'linear', 'cosine', 'quadratic', 'sigmoid')"
-        )
-    
-    schedule_type = schedule_config["type"]
-    
-    # Step 2: Validate schedule type
-    valid_types = ["linear", "cosine", "quadratic", "sigmoid"]
-    if schedule_type not in valid_types:
-        raise ValueError(
-            f"Unknown schedule type: {schedule_type}. "
-            f"Choose from: {valid_types}"
-        )
-    
-    # Step 3: Check required parameters for each schedule type
-    if "timesteps" not in schedule_config:
-        raise ValueError(
-            f"Required parameter 'timesteps' is missing for schedule type '{schedule_type}'. "
-            f"Please add 'timesteps' in diffusion.schedule"
-        )
-    timesteps = schedule_config["timesteps"]
-    
-    # Step 4: Validate type-specific parameters
-    if schedule_type == "linear":
-        required_params = ["beta_start", "beta_end"]
-        missing_params = [p for p in required_params if p not in schedule_config]
-        if missing_params:
-            raise ValueError(
-                f"Required parameters for 'linear' schedule are missing: {missing_params}. "
-                f"Please add {missing_params} in diffusion.schedule"
+    # Model (DiT)
+    model_cfg = config.get("model", {})
+    model_type = model_cfg.get("type", "dit")
+    if model_type != "dit":
+        raise ValueError(f"Only model type 'dit' is supported; got '{model_type}'")
+    opts = model_cfg.get("options", {})
+    d_model = opts.get("d_model", 256)
+    nhead = opts.get("nhead", 8)
+    depth = opts.get("depth", 6)
+    mlp_ratio = opts.get("mlp_ratio", 4.0)
+    dropout = opts.get("dropout", 0.0)
+    label_dim = opts.get("label_dim", 6)
+
+    geo_raw = dataset[0][1]
+    geo_norm = apply_minmax_geo(geo_raw, geo_min, geo_max, feature_range=(0, 1))
+    model = DiffusionDiTTransformer(
+        geo=geo_norm,
+        d_model=d_model,
+        nhead=nhead,
+        depth=depth,
+        mlp_ratio=mlp_ratio,
+        dropout=dropout,
+        label_dim=label_dim,
+    ).to(device)
+
+    # Optimizer
+    train_cfg = config.get("training", {})
+    lr = train_cfg.get("lr", 3e-4)
+    num_epochs = train_cfg.get("nepochs", 20)
+    optim = torch.optim.AdamW(model.parameters(), lr=lr)
+
+    # AMP
+    try:
+        scaler = GradScaler(device.type) if device.type in ("cuda", "mps") else None
+    except (TypeError, ValueError):
+        scaler = GradScaler() if device.type == "cuda" else None
+    print("AMP enabled:", scaler is not None)
+
+    # Optional torch.compile
+    if config.get("compile_model", False) and hasattr(torch, "compile"):
+        try:
+            import torch._dynamo
+            torch._dynamo.config.suppress_errors = True
+            print("Compiling model with torch.compile()...")
+            model = torch.compile(model, mode="reduce-overhead")
+            print("Model compilation successful!")
+        except Exception as e:
+            print("Model compilation failed (continuing without compile):", e)
+    print("params:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
+
+    # Training loop
+    model.train()
+    loss_hist = []
+    steps_per_epoch = len(loader)
+    total_steps = num_epochs * steps_per_epoch
+    best_loss = float("inf")
+    best_checkpoint_path = None
+    print_every = config.get("print_every", 50)
+
+    print(f"Training for {num_epochs} epochs ({steps_per_epoch} batches/epoch, {total_steps} total steps)")
+    print("=" * 60)
+
+    for epoch in range(1, num_epochs + 1):
+        epoch_losses = []
+        pbar = tqdm(enumerate(loader, 1), total=steps_per_epoch, desc=f"Epoch {epoch}/{num_epochs}")
+
+        for batch_idx, (sig, geo, label) in pbar:
+            sig = sig.to(device, non_blocking=True)
+            label = label.to(device, non_blocking=True)
+            sig_clamp = clamp_sig(sig)
+            x0, label_norm = prepare_batch(sig_clamp, label, verbose=(epoch == 1 and batch_idx == 1))
+
+            B = x0.shape[0]
+            t = sample_timesteps(B, T, device)
+            noise = torch.randn_like(x0)
+            x_t = diffusion.apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
+
+            with autocast(device.type, enabled=(scaler is not None)):
+                eps_hat = model(x_t, t, label_norm)
+                loss = F.mse_loss(eps_hat, noise)
+
+            optim.zero_grad(set_to_none=True)
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optim)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optim)
+                scaler.update()
+            else:
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optim.step()
+
+            loss_val = float(loss.item())
+            loss_hist.append(loss_val)
+            epoch_losses.append(loss_val)
+            current_step = (epoch - 1) * steps_per_epoch + batch_idx
+
+            if loss_val < best_loss:
+                best_loss = loss_val
+                if best_checkpoint_path is not None and best_checkpoint_path.exists():
+                    best_checkpoint_path.unlink()
+                best_checkpoint_path = output_dir / (
+                    f"best_checkpoint_epoch_{epoch:03d}_batch_{batch_idx:05d}_step_{current_step:05d}_loss_{best_loss:.6f}.pt"
+                )
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optim.state_dict(),
+                        "epoch": epoch,
+                        "batch_idx": batch_idx,
+                        "step": current_step,
+                        "loss": loss_val,
+                        "best_loss": best_loss,
+                        "betas": betas.cpu(),
+                        "alphas": alphas.cpu(),
+                        "alphas_cumprod": alphas_cumprod.cpu(),
+                        "T": T,
+                        "beta_start": beta_start,
+                        "beta_end": beta_end,
+                        "d_model": model.d_model,
+                        "nhead": nhead,
+                        "depth": depth,
+                        "mlp_ratio": mlp_ratio,
+                        "label_dim": label_dim,
+                    },
+                    best_checkpoint_path,
+                )
+
+            pbar.set_postfix(
+                loss=f"{np.mean(epoch_losses):.6f}",
+                step=current_step,
+                best=f"{best_loss:.6f}",
             )
-        beta_start = schedule_config["beta_start"]
-        beta_end = schedule_config["beta_end"]
-        betas = linear_beta_schedule(timesteps, beta_start, beta_end)
-        
-    elif schedule_type == "cosine":
-        required_params = ["s"]
-        missing_params = [p for p in required_params if p not in schedule_config]
-        if missing_params:
-            raise ValueError(
-                f"Required parameters for 'cosine' schedule are missing: {missing_params}. "
-                f"Please add {missing_params} in diffusion.schedule"
-            )
-        s = schedule_config["s"]
-        betas = cosine_beta_schedule(timesteps, s)
-        
-    elif schedule_type == "quadratic":
-        required_params = ["beta_start", "beta_end"]
-        missing_params = [p for p in required_params if p not in schedule_config]
-        if missing_params:
-            raise ValueError(
-                f"Required parameters for 'quadratic' schedule are missing: {missing_params}. "
-                f"Please add {missing_params} in diffusion.schedule"
-            )
-        beta_start = schedule_config["beta_start"]
-        beta_end = schedule_config["beta_end"]
-        betas = quadratic_beta_schedule(timesteps, beta_start, beta_end)
-        
-    elif schedule_type == "sigmoid":
-        required_params = ["beta_start", "beta_end"]
-        missing_params = [p for p in required_params if p not in schedule_config]
-        if missing_params:
-            raise ValueError(
-                f"Required parameters for 'sigmoid' schedule are missing: {missing_params}. "
-                f"Please add {missing_params} in diffusion.schedule"
-            )
-        beta_start = schedule_config["beta_start"]
-        beta_end = schedule_config["beta_end"]
-        betas = sigmoid_beta_schedule(timesteps, beta_start, beta_end)
-    
-    print(f"Creating noise schedule: {schedule_type}")
-    print(f"  Timesteps: {timesteps}")
-    if schedule_type == "linear":
-        print(f"  beta_start: {schedule_config['beta_start']}, beta_end: {schedule_config['beta_end']}")
-    elif schedule_type == "cosine":
-        print(f"  Parameter s: {schedule_config['s']}")
-    elif schedule_type == "quadratic":
-        print(f"  beta_start: {schedule_config['beta_start']}, beta_end: {schedule_config['beta_end']}")
-    elif schedule_type == "sigmoid":
-        print(f"  beta_start: {schedule_config['beta_start']}, beta_end: {schedule_config['beta_end']}")
-    print(f"  Beta schedule shape: {betas.shape}, range: [{betas.min():.6f}, {betas.max():.6f}]")
-    
-    # Compute alpha_bar (alphas_cumprod) for information
-    alphas = 1.0 - betas
-    alphas_cumprod = th.cumprod(alphas, dim=0)
-    alpha_bar_T = alphas_cumprod[-1].item()  # Last timestep T
-    print(f"  Alpha_bar at T={timesteps}: {alpha_bar_T:.10f}")
-    
-    # Setup device (CUDA > MPS > CPU)
-    _default = "cuda" if th.cuda.is_available() else ("mps" if getattr(th.backends, "mps", None) and th.backends.mps.is_available() else "cpu")
-    device = th.device(config.get("device", _default))
-    betas = betas.to(device)
-    print(f"Device: {device}")
-    
-    print("\nApplying forward diffusion...")
-    for batch_idx, batch in enumerate(data_loader):
-        sig, geo, label = batch
-        sig = sig.to(device)  # (B, 2, L)
-        
-        # Random timesteps for each sample in batch
-        B = sig.shape[0]
-        timesteps_tensor = th.randint(0, timesteps, (B,), device=device)
-        
-        # Apply forward diffusion (add noise)
-        sig_noised = diffusion.apply_forward_diffusion(
-            x0=sig,
-            betas=betas,
-            timesteps=timesteps_tensor,
+
+        epoch_avg = np.mean(epoch_losses)
+        print(f"\nepoch {epoch:3d}/{num_epochs} completed | avg loss: {epoch_avg:.6f} | best loss: {best_loss:.6f}")
+        if best_checkpoint_path:
+            print("Best model saved:", best_checkpoint_path.name)
+        print("-" * 60)
+
+    print("Training done!")
+
+    # Quick visualization: one event, different t
+    model.eval()
+    event_idx = 0
+    sig_raw, geo_raw, label_raw = dataset[event_idx]
+    geo_np = geo_raw.detach().cpu().numpy()
+    label_np = label_raw.detach().cpu().numpy()
+    sig = sig_raw.unsqueeze(0).to(device)
+    label = label_raw.unsqueeze(0).to(device)
+    sig_clamp = clamp_sig(sig)
+    x0, _ = prepare_batch(sig_clamp, label, verbose=False)
+
+    for t_val in [0, 250, 500, 750, 1000]:
+        t = torch.tensor([t_val], device=device, dtype=torch.long)
+        noise = torch.randn_like(x0)
+        x_t = diffusion.apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
+        x_t_denorm = denormalize_sig(x_t)[0].detach().cpu().numpy()
+        out_path = output_dir / f"event_{event_idx}_t_{t_val}.png"
+        show_event_dual_plot(
+            sig=x_t_denorm,
+            geo=geo_np,
+            label=label_np,
+            output_path=str(out_path),
+            figure_size=(18, 8),
+            marker_size=8.0,
+            show_detector_hull=True,
+            show=False,
+            title_prefix=f"train.py | {schedule_type} | event {event_idx} | t={t_val}",
+            firsttime_title="FirstTime (x_t, denorm)",
+            npe_title="nPE (x_t, denorm)",
         )
-        
-        print(f"\nBatch {batch_idx + 1}:")
-        print(f"  Original signal shape: {sig.shape}")
-        print(f"  Original signal range: [{sig.min():.4f}, {sig.max():.4f}]")
-        print(f"  Original signal mean: {sig.mean():.4f}, std: {sig.std():.4f}")
-        print(f"  Timesteps: {timesteps_tensor.tolist()}")
-        print(f"  Noised signal shape: {sig_noised.shape}")
-        print(f"  Noised signal range: [{sig_noised.min():.4f}, {sig_noised.max():.4f}]")
-        print(f"  Noised signal mean: {sig_noised.mean():.4f}, std: {sig_noised.std():.4f}")
-        
-        if batch_idx == 0:
-            break
-    
-    print("\nDone")
+
+    # Sampling (DDPM reverse)
+    print("\n" + "=" * 60)
+    print("Sampling from trained model...")
+    print("=" * 60)
+    model.eval()
+    ref_idx = 0
+    with torch.no_grad():
+        sig_ref_raw, geo_ref_raw, label_ref_raw = dataset[ref_idx]
+        sig_ref_clamp = clamp_sig(sig_ref_raw.unsqueeze(0).to(device))
+        sig_ref_denorm = sig_ref_clamp[0].detach().cpu().numpy()
+        geo_ref_np = geo_ref_raw.detach().cpu().numpy()
+        label_ref_np = label_ref_raw.detach().cpu().numpy()
+        actual_path = output_dir / f"actual_event_{ref_idx}.png"
+        show_event_dual_plot(
+            sig=sig_ref_denorm,
+            geo=geo_ref_np,
+            label=label_ref_np,
+            output_path=str(actual_path),
+            figure_size=(18, 8),
+            marker_size=8.0,
+            show_detector_hull=True,
+            show=False,
+            title_prefix=f"train.py | Actual data | event {ref_idx}",
+            firsttime_title="FirstTime (actual)",
+            npe_title="nPE (actual)",
+        )
+        _, label_ref_norm = prepare_batch(sig_ref_clamp, label_ref_raw.unsqueeze(0).to(device), verbose=False)
+        B = 1
+        x = torch.randn(B, 2, model.L, device=device)
+        for t_val in reversed(range(1, T + 1)):
+            t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
+            with autocast(device.type, enabled=(scaler is not None)):
+                eps_hat = model(x, t_batch, label_ref_norm)
+            idx = t_val - 1
+            alpha_t = alphas[idx]
+            alpha_bar_t = alphas_cumprod[idx]
+            mean = (1.0 / torch.sqrt(alpha_t)) * (
+                x - (betas[idx] / torch.sqrt(1.0 - alpha_bar_t)) * eps_hat
+            )
+            if t_val > 1:
+                alpha_bar_prev = alphas_cumprod[idx - 1] if idx > 0 else torch.tensor(1.0, device=device)
+                posterior_variance = betas[idx] * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
+                var = torch.sqrt(posterior_variance)
+                x = mean + var * torch.randn_like(x)
+            else:
+                x = mean
+        samples_denorm = denormalize_sig(x)
+        sample_np = samples_denorm[0].detach().cpu().numpy()
+        sampled_path = output_dir / f"sampled_event_{ref_idx}.png"
+        show_event_dual_plot(
+            sig=sample_np,
+            geo=geo_ref_np,
+            label=label_ref_np,
+            output_path=str(sampled_path),
+            figure_size=(18, 8),
+            marker_size=8.0,
+            show_detector_hull=True,
+            show=False,
+            title_prefix=f"train.py | Sampled | event {ref_idx}",
+            firsttime_title="FirstTime (sampled)",
+            npe_title="nPE (sampled)",
+        )
+    print("Sampling completed!")
+
+    # Save final checkpoint
+    print("\n" + "=" * 60)
+    print("Saving final model...")
+    print("=" * 60)
+    final_path = output_dir / "model_checkpoint_final.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optim.state_dict(),
+            "epoch": num_epochs,
+            "final_loss": loss_hist[-1] if loss_hist else None,
+            "best_loss": best_loss,
+            "betas": betas.cpu(),
+            "alphas": alphas.cpu(),
+            "alphas_cumprod": alphas_cumprod.cpu(),
+            "T": T,
+            "beta_start": beta_start,
+            "beta_end": beta_end,
+            "d_model": model.d_model,
+            "nhead": nhead,
+            "depth": depth,
+            "mlp_ratio": mlp_ratio,
+            "label_dim": label_dim,
+        },
+        final_path,
+    )
+    print("Final model saved to:", final_path)
+    if best_checkpoint_path:
+        print("Best model (loss={:.6f}):".format(best_loss), best_checkpoint_path.name)
+    print("Done!")
 
 
-    
+if __name__ == "__main__":
+    main()
