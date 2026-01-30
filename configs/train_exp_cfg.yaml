@@ -1,0 +1,53 @@
+# train_exp_cfg.py: YAML config (CFG + val + seed)
+# Usage: python train_exp_cfg.py -c configs/train_exp_cfg.yaml
+
+seed: 42
+
+# Classifier-Free Guidance
+cfg:
+  use_cfg: true
+  cfg_scale: 2.0        # inference: eps = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
+  cfg_dropout: 0.1     # training: prob to replace label with null (unconditional)
+
+# Validation
+val_ratio: 0.05         # fraction of dataset for validation (e.g. 5%)
+val_every: 1            # compute val loss every N epochs
+
+# Diffusion schedule (same as train_exp)
+diffusion:
+  schedule:
+    type: sigmoid
+    timesteps: 1000
+    beta_start: 0.0001
+    beta_end: 0.02
+
+# Training
+training:
+  nepochs: 20
+  lr: 0.0003
+  bsz: 256
+
+# Model (DiT)
+model:
+  type: dit
+  options:
+    d_model: 256
+    nhead: 8
+    depth: 6
+    mlp_ratio: 4.0
+    dropout: 0.0
+    label_dim: 6
+
+# Data
+data:
+  loader: h5
+  h5_path: ./GENESIS-data/22644_0921_time_shift.h5
+  num_workers: 32
+  shuffle: true
+  angle_conversion: true
+  pin_memory: false
+
+path: ./output/
+device: cuda
+print_every: 50
+compile_model: false
