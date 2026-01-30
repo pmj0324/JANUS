@@ -367,6 +367,9 @@ class DiffusionDiTTransformer(nn.Module):
 _geo_raw = dataset[0][1]  # (3, L)
 _geo = apply_minmax_geo(_geo_raw, geo_min, geo_max, feature_range=(0, 1))
 model = DiffusionDiTTransformer(geo=_geo, d_model=256, nhead=8, depth=6, mlp_ratio=4.0, dropout=0.0, label_dim=6).to(device)
+if device.type == "cuda":
+    torch.cuda.reset_peak_memory_stats()
+    print(f"[GPU] after model: {torch.cuda.memory_allocated() / 1e9:.3f} GB")
 optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
 # AMP (Automatic Mixed Precision): CUDA/MPS 지원
@@ -430,6 +433,8 @@ for epoch in range(1, num_epochs + 1):
             for j in [1, 2]:
                 ok = torch.allclose(_label_raw_before[:, j], label[:, j])
                 print(f"  identity col {j} ({LABEL_NAMES[j]}): {'OK' if ok else 'MISMATCH'} raw={_label_raw_before[0, j].item():.6f} norm={label[0, j].item():.6f}")
+            if device.type == "cuda":
+                print(f"[GPU] after first batch (before step): {torch.cuda.memory_allocated() / 1e9:.3f} GB")
 
         B = x0.shape[0]
         t = sample_timesteps(B, T, device)
@@ -456,6 +461,8 @@ for epoch in range(1, num_epochs + 1):
             optim.step()
 
         loss_val = float(loss.item())
+        if device.type == "cuda" and epoch == 1 and batch_idx == 1:
+            print(f"[GPU] after first step: {torch.cuda.memory_allocated() / 1e9:.3f} GB (peak: {torch.cuda.max_memory_allocated() / 1e9:.3f} GB)")
         loss_hist.append(loss_val)
         epoch_losses.append(loss_val)
 

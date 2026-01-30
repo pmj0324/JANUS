@@ -257,6 +257,10 @@ def main():
         label_dim=label_dim,
     ).to(device)
 
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+        print(f"[GPU] after model: {torch.cuda.memory_allocated() / 1e9:.3f} GB")
+
     # Optimizer
     train_cfg = config.get("training", {})
     lr = train_cfg.get("lr", 3e-4)
@@ -292,6 +296,8 @@ def main():
     print_every = config.get("print_every", 50)
 
     print(f"Training for {num_epochs} epochs ({steps_per_epoch} batches/epoch, {total_steps} total steps)")
+    if device.type == "cuda" and batch_size >= 256:
+        print("(If GPU OOM, reduce data.bsz in config, e.g. 128 or 64)")
     print("=" * 60)
 
     for epoch in range(1, num_epochs + 1):
@@ -303,6 +309,9 @@ def main():
             label = label.to(device, non_blocking=True)
             sig_clamp = clamp_sig(sig)
             x0, label_norm = prepare_batch(sig_clamp, label, verbose=(epoch == 1 and batch_idx == 1))
+
+            if device.type == "cuda" and epoch == 1 and batch_idx == 1:
+                print(f"[GPU] after first batch (before step): {torch.cuda.memory_allocated() / 1e9:.3f} GB")
 
             B = x0.shape[0]
             t = sample_timesteps(B, T, device)
@@ -326,6 +335,8 @@ def main():
                 optim.step()
 
             loss_val = float(loss.item())
+            if device.type == "cuda" and epoch == 1 and batch_idx == 1:
+                print(f"[GPU] after first step: {torch.cuda.memory_allocated() / 1e9:.3f} GB (peak: {torch.cuda.max_memory_allocated() / 1e9:.3f} GB)")
             loss_hist.append(loss_val)
             epoch_losses.append(loss_val)
             current_step = (epoch - 1) * steps_per_epoch + batch_idx
