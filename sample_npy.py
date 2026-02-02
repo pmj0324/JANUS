@@ -35,8 +35,9 @@ def plot_histogram(
     """nPE와 FirstTime 히스토그램 저장."""
     npe = sig[0]
     ftime = sig[1]
-    npe_plot = npe[npe > cut_npe]
-    ftime_plot = ftime[ftime > cut_firsttime]
+    # inf/nan 제외 (히스토그램 range 오류 방지)
+    npe_plot = npe[(npe > cut_npe) & np.isfinite(npe)]
+    ftime_plot = ftime[(ftime > cut_firsttime) & np.isfinite(ftime)]
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 

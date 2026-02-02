@@ -317,7 +317,7 @@ def plot_histogram(
 ):
     """
     nPE와 FirstTime의 히스토그램을 그려서 저장.
-    
+
     Args:
         sig: (2, L) 형태의 샘플 데이터
         output_path: 저장 경로
@@ -327,13 +327,13 @@ def plot_histogram(
     """
     npe = sig[0]  # nPE 채널
     ftime = sig[1]  # FirstTime 채널
-    
-    # cut 이하 제외. cut=0(디폴트)이면 전부 포함, cut>0이면 해당 값 초과만
-    npe_for_hist = npe if cut_npe == 0 else npe[npe > cut_npe]
-    ftime_for_hist = ftime if cut_firsttime == 0 else ftime[ftime > cut_firsttime]
-    
+
+    # cut 이하 제외. inf/nan 제외 (샘플에서 inf 나올 수 있음)
+    npe_for_hist = npe[np.isfinite(npe)] if cut_npe == 0 else npe[(npe > cut_npe) & np.isfinite(npe)]
+    ftime_for_hist = ftime[np.isfinite(ftime)] if cut_firsttime == 0 else ftime[(ftime > cut_firsttime) & np.isfinite(ftime)]
+
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
+
     # nPE 히스토그램
     ax1 = axes[0]
     if len(npe_for_hist) > 0:
@@ -348,7 +348,7 @@ def plot_histogram(
     else:
         ax1.text(0.5, 0.5, 'No nPE values above cut', ha='center', va='center', transform=ax1.transAxes)
         ax1.set_title(f'nPE Distribution{title_suffix} (empty)')
-    
+
     # FirstTime 히스토그램
     ax2 = axes[1]
     if len(ftime_for_hist) > 0:
@@ -363,7 +363,7 @@ def plot_histogram(
     else:
         ax2.text(0.5, 0.5, 'No FirstTime values above cut', ha='center', va='center', transform=ax2.transAxes)
         ax2.set_title(f'FirstTime Distribution{title_suffix} (empty)')
-    
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -463,7 +463,10 @@ def sample(
     
     print("Sampling completed!")
     print(f"Generated {num_samples} sample(s)")
-    
+
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     # 각 샘플 저장
     saved_samples = []
     for i in range(num_samples):
