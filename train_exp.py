@@ -37,13 +37,20 @@ output_dir.mkdir(exist_ok=True)
 print(f"Output directory: {output_dir.absolute()}")
 
 # ---- config (원하는대로 바꿔도 됨) ----
+# Diffusion schedule
 T = 1000
 beta_start, beta_end = 1e-4, 2e-2  # sigmoid schedule params
 
+# Training
 batch_size = 256
 num_workers = 32  # 데이터 로딩 병렬화 (CPU 코어 수에 맞게 조정 가능, 0은 병렬화 없음)
 lr = 3e-4
 num_epochs = 20
+
+# Learning rate scheduler (ReduceLROnPlateau)
+lr_scheduler_patience = 5  # epochs to wait before reducing LR
+lr_scheduler_factor = 0.5  # factor to reduce LR by
+lr_scheduler_min = 1e-6  # minimum learning rate
 
 # 데이터/정규화: nPE는 clamp 후 minmax만, FirstTime은 clamp 후 log_minmax
 npe_clip = 1000.0
@@ -372,6 +379,16 @@ if device.type == "cuda":
     print(f"[GPU] after model: {torch.cuda.memory_allocated() / 1e9:.3f} GB")
 optim = torch.optim.AdamW(model.parameters(), lr=lr)
 
+# Learning rate scheduler (ReduceLROnPlateau)
+lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optim,
+    mode='min',
+    factor=lr_scheduler_factor,
+    patience=lr_scheduler_patience,
+    min_lr=lr_scheduler_min,
+    verbose=True
+)
+
 # AMP (Automatic Mixed Precision): CUDA/MPS 지원
 try:
     scaler = GradScaler(device.type) if device.type in ("cuda", "mps") else None
@@ -510,7 +527,11 @@ for epoch in range(1, num_epochs + 1):
     
     # Epoch summary
     epoch_avg_loss = np.mean(epoch_losses)
-    print(f"\nepoch {epoch:3d}/{num_epochs} completed | avg loss: {epoch_avg_loss:.6f} | best loss: {best_loss:.6f}")
+    
+    # Update LR scheduler based on epoch average loss
+    lr_scheduler.step(epoch_avg_loss)
+    
+    print(f"\nepoch {epoch:3d}/{num_epochs} completed | avg loss: {epoch_avg_loss:.6f} | best loss: {best_loss:.6f} | lr: {optim.param_groups[0]['lr']:.2e}")
     if best_checkpoint_path:
         print(f"Best model saved: {best_checkpoint_path.name}")
     print("-"*60)
@@ -619,9 +640,9 @@ with torch.no_grad():
             x - (betas[idx] / torch.sqrt(1.0 - alpha_bar_t)) * eps_hat
         )
         
-        # 분산 계산 (posterior variance)
+        # 분산 계산 (posterior variance) - 인덱싱 교정: t_val > 1이면 idx >= 1이므로 idx-1은 항상 유효
         if t_val > 1:
-            alpha_bar_prev = alphas_cumprod[idx - 1] if idx > 0 else torch.tensor(1.0, device=device)
+            alpha_bar_prev = alphas_cumprod[idx - 1]  # idx >= 1이므로 안전
             posterior_variance = betas[idx] * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
             var = torch.sqrt(posterior_variance)
             noise = torch.randn_like(x)

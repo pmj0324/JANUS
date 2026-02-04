@@ -1,0 +1,65 @@
+# train_exp_new_cfg.py: YAML config with CFG, validation, and early stopping
+# Usage: python train_exp_new_cfg.py -c configs/train_exp_new_cfg.yaml
+
+seed: 42
+
+# Classifier-Free Guidance (CFG)
+cfg:
+  use_cfg: false          # Enable CFG training (set to true to enable)
+  cfg_scale: 2.0          # CFG scale for inference
+  cfg_dropout: 0.1        # Probability to drop label during training
+
+# Validation
+val_ratio: 0.1            # Fraction of dataset for validation (10%)
+val_every: 1              # Compute val loss every N epochs
+
+# Learning rate scheduler (ReduceLROnPlateau)
+lr_scheduler:
+  patience: 5             # Epochs to wait before reducing LR
+  factor: 0.5             # Factor to reduce LR by
+  min_lr: 1e-6            # Minimum learning rate
+
+# Early stopping
+early_stopping:
+  patience: 10            # Epochs to wait before stopping
+  min_delta: 1e-6         # Minimum change to qualify as improvement
+
+# Diffusion schedule
+diffusion:
+  schedule:
+    type: sigmoid
+    timesteps: 1000
+    beta_start: 0.0001    # 1e-4
+    beta_end: 0.02        # 2e-2
+
+# Training
+training:
+  nepochs: 20
+  lr: 0.0003              # 3e-4
+  bsz: 256                # batch_size
+
+# Model (DiT)
+model:
+  type: dit
+  options:
+    d_model: 256
+    nhead: 8
+    depth: 6
+    mlp_ratio: 4.0
+    dropout: 0.0
+    label_dim: 6
+
+# Data
+data:
+  loader: h5
+  h5_path: ./GENESIS-data/22644_0921_time_shift.h5
+  num_workers: 32
+  shuffle: true
+  angle_conversion: true
+  pin_memory: false
+
+# Paths and other settings
+path: ./output/
+device: cuda
+print_every: 50
+compile_model: false
