@@ -35,6 +35,16 @@ from utils.device import get_default_device
 # Configuration Parameters (can be overridden by YAML)
 # ============================================================================
 
+# ============================================================================
+# Save Paths (모델과 플롯 저장 경로 지정) - 맨 앞에 위치
+# ============================================================================
+# 모델 체크포인트 저장 경로
+model_save_dir = Path("./output/models")
+# 플롯 저장 경로 (None이면 플롯 저장 안 함)
+plot_save_dir = Path("./output/plots")
+# 전체 출력 디렉토리 (하위 디렉토리 자동 생성용, 선택사항)
+output_dir = Path("./output")
+
 # Diffusion schedule
 T = 1000
 beta_start, beta_end = 1e-4, 2e-2  # sigmoid schedule params
@@ -105,9 +115,8 @@ model_mlp_ratio = 4.0
 model_dropout = 0.0
 model_label_dim = 6
 
-# Paths
+# Data paths
 h5_path = "./GENESIS-data/22644_0921_time_shift.h5"
-output_dir = Path("./output")
 
 # Other
 seed = 42
@@ -132,7 +141,7 @@ def apply_config(config: dict):
     global early_stopping_patience, early_stopping_min_delta
     global use_cfg, cfg_dropout, cfg_scale
     global model_d_model, model_nhead, model_depth, model_mlp_ratio, model_dropout, model_label_dim
-    global h5_path, output_dir, seed, compile_model, print_every
+    global h5_path, output_dir, model_save_dir, plot_save_dir, seed, compile_model, print_every
     
     # Diffusion
     if 'diffusion' in config:
@@ -194,9 +203,17 @@ def apply_config(config: dict):
         h5_path = data.get('h5_path', h5_path)
         num_workers = data.get('num_workers', num_workers)
     
-    # Paths
-    if 'path' in config:
+    # Paths - 저장 경로 설정 (우선순위: 개별 설정 > path 설정)
+    if 'model_save_dir' in config:
+        model_save_dir = Path(config['model_save_dir'])
+    elif 'path' in config:
         output_dir = Path(config['path'])
+        model_save_dir = output_dir / "models"
+    
+    if 'plot_save_dir' in config:
+        plot_save_dir = Path(config['plot_save_dir']) if config['plot_save_dir'] else None
+    elif 'path' in config:
+        plot_save_dir = output_dir / "plots"
     if 'seed' in config:
         seed = config['seed']
     if 'compile_model' in config:
@@ -484,9 +501,18 @@ def main():
     device = get_default_device()
     print("device:", device)
     
-    # Output directory
+    # Create output directories
     output_dir.mkdir(exist_ok=True, parents=True)
+    model_save_dir.mkdir(exist_ok=True, parents=True)
+    if plot_save_dir is not None:
+        plot_save_dir.mkdir(exist_ok=True, parents=True)
+    
     print(f"Output directory: {output_dir.absolute()}")
+    print(f"Model save directory: {model_save_dir.absolute()}")
+    if plot_save_dir is not None:
+        print(f"Plot save directory: {plot_save_dir.absolute()}")
+    else:
+        print("Plot saving: disabled")
     
     # Load dataset
     print(f"Loading dataset from: {h5_path}")
@@ -704,7 +730,7 @@ def main():
                 if best_checkpoint_path is not None and best_checkpoint_path.exists():
                     best_checkpoint_path.unlink()
                 
-                best_checkpoint_path = output_dir / f"best_checkpoint_epoch_{epoch:03d}_val_loss_{best_val_loss:.6f}.pt"
+                best_checkpoint_path = model_save_dir / f"best_checkpoint_epoch_{epoch:03d}_val_loss_{best_val_loss:.6f}.pt"
                 checkpoint = {
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optim.state_dict(),
@@ -748,7 +774,7 @@ def main():
     print("\nTraining done!")
     
     # Save final model
-    final_checkpoint_path = output_dir / "model_checkpoint_final.pt"
+    final_checkpoint_path = model_save_dir / "model_checkpoint_final.pt"
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optim.state_dict(),
@@ -848,6 +874,27 @@ def main():
         print(f"Sample shape: {sample_np.shape}")
         print(f"Sample nPE range: [{sample_np[0].min():.2f}, {sample_np[0].max():.2f}]")
         print(f"Sample FirstTime range: [{sample_np[1].min():.2f}, {sample_np[1].max():.2f}]")
+        
+        # Save sample plot if plot_save_dir is set
+        if plot_save_dir is not None:
+            geo_ref_np = geo_ref_raw.detach().cpu().numpy()
+            label_ref_np = label_ref_raw.detach().cpu().numpy()
+            
+            sampled_output_path = plot_save_dir / f"sampled_event_{ref_idx}.png"
+            fig_sampled, _ = show_event_dual_plot(
+                sig=sample_np,
+                geo=geo_ref_np,
+                label=label_ref_np,
+                output_path=str(sampled_output_path),
+                figure_size=(18, 8),
+                marker_size=8.0,
+                show_detector_hull=True,
+                show=False,
+                title_prefix=f"train_exp_new_cfg.py | Sampled data | using label from event {ref_idx}",
+                firsttime_title="FirstTime (sampled)",
+                npe_title="nPE (sampled)",
+            )
+            print(f"Sampled event plot saved to: {sampled_output_path}")
     
     print("Done!")
 

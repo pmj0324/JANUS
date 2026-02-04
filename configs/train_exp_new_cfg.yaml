@@ -59,7 +59,11 @@ data:
   pin_memory: false
 
 # Paths and other settings
-path: ./output/
+# 저장 경로 설정 (모델과 플롯 분리 저장)
+model_save_dir: ./output/models      # 모델 체크포인트 저장 경로
+plot_save_dir: ./output/plots        # 플롯 저장 경로 (null이면 저장 안 함)
+# path: ./output/                    # 전체 출력 디렉토리 (선택사항, 위 경로들의 부모 디렉토리)
+
 device: cuda
 print_every: 50
 compile_model: false
