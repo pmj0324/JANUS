@@ -127,8 +127,7 @@ def process_event_batch(args):
     
     for event_idx in range(start_idx, end_idx):
         try:
-            sample_dict = dataset[event_idx]
-            sig = sample_dict["sig"]  # (2, L)
+            sig, _geo, _label = dataset[event_idx]  # (sig, geo, label)
             
             # Extract nPE and firstTime
             npe = sig[0, :].numpy()  # (L,)
@@ -348,7 +347,7 @@ def plot_distributions(
     fig.legend(handles=legend_elements, loc='lower center', ncol=3, bbox_to_anchor=(0.5, 0.02), fontsize=10)
     
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.08)  # Make room for legend
+    plt.subplots_adjust(bottom=0.10)  # Extra space so legend does not overlap second row x-axis labels
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     
@@ -448,6 +447,7 @@ def main():
         print(f" Loaded histogram data:")
         print(f"   nPE values: {len(npe_all):,}")
         print(f"   firstTime values: {len(ftime_all):,}")
+        n_hits = len(npe_all)
     else:
         # Load config
         print(f"\n Loading configuration from: {args.config}")
@@ -488,8 +488,7 @@ def main():
         
         for idx in tqdm(sample_indices, desc="Sampling"):
             try:
-                sample_dict = dataset[int(idx)]
-                sig = sample_dict["sig"]
+                sig, _geo, _label = dataset[int(idx)]  # H5Dataset returns (sig, geo, label)
                 npe = sig[0, :].numpy()
                 ftime = sig[1, :].numpy()
                 
@@ -573,7 +572,7 @@ def main():
         npe_edges = np.linspace(npe_range[0], npe_range[1], args.npe_bins + 1)
         ftime_edges = np.linspace(ftime_range[0], ftime_range[1], args.ftime_bins + 1)
         
-        max_events = len(npe_all)  # For title
+        n_hits = len(npe_all)  # For title (number of nPE/ftime values = hits)
     
     # Determine output path
     output_path = Path(args.output)
@@ -598,7 +597,7 @@ def main():
         ftime_all=ftime_all,
         output_path=output_path,
         histogram_data_path=histogram_data_path,
-        title_suffix=f"({max_events:,} events)"
+        title_suffix=f"({n_hits:,} hits)"
     )
     
     print("\n" + "="*80)
