@@ -59,10 +59,9 @@ data:
   pin_memory: false
 
 # Paths and other settings
-# 저장 경로 설정 (모델과 플롯 분리 저장)
-model_save_dir: ./output/models      # 모델 체크포인트 저장 경로
-plot_save_dir: ./output/plots        # 플롯 저장 경로 (null이면 저장 안 함)
-# path: ./output/                    # 전체 출력 디렉토리 (선택사항, 위 경로들의 부모 디렉토리)
+# 저장 경로 설정 (기본 경로 지정 시 그 아래 models/와 plots/ 폴더 자동 생성)
+path: ./output/                      # 기본 출력 디렉토리 (이 경로 아래 models/와 plots/ 자동 생성)
+save_plots: true                     # 플롯 저장 활성화 여부 (false면 plots 폴더 생성 안 함)
 
 device: cuda
 print_every: 50

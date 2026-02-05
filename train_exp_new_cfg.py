@@ -38,12 +38,10 @@ from utils.device import get_default_device
 # ============================================================================
 # Save Paths (모델과 플롯 저장 경로 지정) - 맨 앞에 위치
 # ============================================================================
-# 모델 체크포인트 저장 경로
-model_save_dir = Path("./output/models")
-# 플롯 저장 경로 (None이면 플롯 저장 안 함)
-plot_save_dir = Path("./output/plots")
-# 전체 출력 디렉토리 (하위 디렉토리 자동 생성용, 선택사항)
+# 기본 출력 디렉토리 지정 (이 경로 아래에 models/와 plots/ 폴더가 자동 생성됨)
 output_dir = Path("./output")
+# 플롯 저장 활성화 여부 (False면 plots 폴더 생성 안 함)
+save_plots = True
 
 # Diffusion schedule
 T = 1000
@@ -143,7 +141,7 @@ def apply_config(config: dict):
     global early_stopping_patience, early_stopping_min_delta
     global use_cfg, cfg_dropout, cfg_scale
     global model_d_model, model_nhead, model_depth, model_mlp_ratio, model_dropout, model_label_dim
-    global h5_path, output_dir, model_save_dir, plot_save_dir, seed, compile_model, print_every
+    global h5_path, output_dir, save_plots, seed, compile_model, print_every
     
     # Diffusion
     if 'diffusion' in config:
@@ -208,17 +206,12 @@ def apply_config(config: dict):
         h5_path = data.get('h5_path', h5_path)
         num_workers = data.get('num_workers', num_workers)
     
-    # Paths - 저장 경로 설정 (우선순위: 개별 설정 > path 설정)
-    if 'model_save_dir' in config:
-        model_save_dir = Path(config['model_save_dir'])
-    elif 'path' in config:
+    # Paths - 저장 경로 설정
+    if 'path' in config:
         output_dir = Path(config['path'])
-        model_save_dir = output_dir / "models"
     
-    if 'plot_save_dir' in config:
-        plot_save_dir = Path(config['plot_save_dir']) if config['plot_save_dir'] else None
-    elif 'path' in config:
-        plot_save_dir = output_dir / "plots"
+    if 'save_plots' in config:
+        save_plots = config['save_plots']
     if 'seed' in config:
         seed = config['seed']
     if 'compile_model' in config:
@@ -506,15 +499,20 @@ def main():
     device = get_default_device()
     print("device:", device)
     
-    # Create output directories
+    # Create output directories (기본 경로 아래에 models/와 plots/ 자동 생성)
     output_dir.mkdir(exist_ok=True, parents=True)
+    model_save_dir = output_dir / "models"
     model_save_dir.mkdir(exist_ok=True, parents=True)
-    if plot_save_dir is not None:
+    
+    if save_plots:
+        plot_save_dir = output_dir / "plots"
         plot_save_dir.mkdir(exist_ok=True, parents=True)
+    else:
+        plot_save_dir = None
     
     print(f"Output directory: {output_dir.absolute()}")
     print(f"Model save directory: {model_save_dir.absolute()}")
-    if plot_save_dir is not None:
+    if save_plots:
         print(f"Plot save directory: {plot_save_dir.absolute()}")
     else:
         print("Plot saving: disabled")
