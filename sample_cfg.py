@@ -20,6 +20,7 @@ except ImportError:
     from torch.cuda.amp import GradScaler
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import h5py
 
 _ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_ROOT))
@@ -375,7 +376,14 @@ def main():
 
     scaler = None
     geo_np = None
+    
+    # 모델용 dataset: angle_conversion=True (기본값) -> label은 [Energy (PeV), ux, uy, X, Y, Z] 형식
+    # 시각화용 dataset: angle_conversion=False -> label은 [Energy (MeV), Zenith (rad), Azimuth (rad), X, Y, Z] 형식
+    h5_path = "./GENESIS-data/22644_0921_time_shift.h5"
+    dataset_orig = H5Dataset(h5_path=h5_path, angle_conversion=False, energy_in_pev=False)
+    
     if args.label:
+        # 사용자 지정 label: [Energy, ux, uy, X, Y, Z] 형식 (모델 입력 형식)
         label_values = [float(x.strip()) for x in args.label.split(",")]
         if len(label_values) != 6:
             raise ValueError("Label must have 6 values: Energy,ux,uy,X,Y,Z")
@@ -384,14 +392,23 @@ def main():
         ref_idx = 0
         sig_ref_raw, geo_ref_raw, _ = dataset[0]
         geo_np = geo_ref_raw.detach().cpu().numpy()
+        # 시각화용: 원본 label 가져오기 (Energy는 MeV, 각도는 라디안)
+        _, _, label_orig_raw = dataset_orig[ref_idx]
+        label_orig_np = label_orig_raw.detach().cpu().numpy()
     else:
+        # 데이터셋에서 가져오기
         ref_idx = args.ref_idx
         sig_ref_raw, geo_ref_raw, label_ref_raw = dataset[ref_idx]
+        # 모델용 label: [Energy (PeV), ux, uy, X, Y, Z] 형식 (angle_conversion=True)
         label = label_ref_raw.to(device)
         label_np = label_ref_raw.detach().cpu().numpy()
         geo_np = geo_ref_raw.detach().cpu().numpy()
+        # 시각화용: 원본 label 가져오기 (Energy는 MeV, 각도는 라디안)
+        _, _, label_orig_raw = dataset_orig[ref_idx]
+        label_orig_np = label_orig_raw.detach().cpu().numpy()
 
-    print(f"Using label: {label_np}")
+    print(f"Using label (for model, [Energy(PeV), ux, uy, X, Y, Z]): {label_np}")
+    print(f"Using original label (for visualization, [Energy(MeV), Zenith(rad), Azimuth(rad), X, Y, Z]): {label_orig_np}")
 
     null_label_norm = None
     if use_cfg and cfg_scale != 1.0:
@@ -407,10 +424,12 @@ def main():
         # 오리지널(actual)에는 cut 없음 (0, 0). cut은 샘플에만 적용.
         sig_actual_vis = _apply_cuts(sig_ref_denorm, 0.0, 0.0)
         actual_output_path = output_dir / f"actual_event_{ref_idx}.png"
+        # 시각화: 원본 label 사용 (Energy는 MeV, 각도는 라디안)
+        # show_event_dual_plot가 자동으로 형식을 감지하고 변환함
         show_event_dual_plot(
             sig=sig_actual_vis,
             geo=geo_np,
-            label=label_np,
+            label=label_orig_np,
             output_path=str(actual_output_path),
             figure_size=(18, 8),
             marker_size=8.0,
@@ -438,7 +457,7 @@ def main():
         output_dir=output_dir,
         ref_idx=ref_idx,
         geo_np=geo_np,
-        label_np=label_np,
+        label_np=label_orig_np,  # 시각화용 원본 label 사용
         save_histogram=args.histogram,
         cut_npe=args.cut_npe,
         cut_firsttime=args.cut_firsttime,

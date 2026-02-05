@@ -332,7 +332,10 @@ def show_event_dual_plot(
     Args:
         sig: Signal array with shape (2, L) - [npe, firstTime]
         geo: Geometry array with shape (3, L) - [x, y, z]
-        label: Label array with shape (6,) - [Energy, Zenith, Azimuth, X, Y, Z]
+        label: Label array with shape (6,) - Supports two formats:
+            - [Energy (MeV), Zenith (rad), Azimuth (rad), X, Y, Z] (original format)
+            - [Energy (PeV), ux, uy, X, Y, Z] (model format, automatically converted)
+            The function automatically detects the format based on the values.
         output_path: Path to save the plot (PNG/PDF/SVG). If None, doesn't save.
         figure_size: Figure size for plots
         marker_size: Size of markers for non-zero values
@@ -373,12 +376,29 @@ def show_event_dual_plot(
     z = np.asarray(geo[2, :], dtype=np.float32)
     
     # Extract event data
-    energy, zenith, azimuth, x_pos, y_pos, z_pos = label
+    energy, val1, val2, x_pos, y_pos, z_pos = label
     npe = np.asarray(sig[0, :], dtype=np.float32)
     ftime = np.asarray(sig[1, :], dtype=np.float32)
     
     # Sanitize firstTime: ±inf → 0
     ftime[np.isinf(ftime)] = 0.0
+    
+    # Detect label format: [Energy, ux, uy, X, Y, Z] vs [Energy, Zenith, Azimuth, X, Y, Z]
+    # ux, uy are typically in [-1, 1] range, while Zenith/Azimuth in radians are typically > 1
+    # More robust: check if val1^2 + val2^2 <= 1 (unit vector constraint for ux, uy)
+    is_ux_uy_format = (abs(val1) <= 1.1 and abs(val2) <= 1.1 and 
+                       (val1**2 + val2**2) <= 1.5)  # Allow some tolerance
+    
+    if is_ux_uy_format:
+        # Convert ux, uy to zenith, azimuth
+        ux, uy = val1, val2
+        sin_zenith = np.sqrt(ux**2 + uy**2)
+        sin_zenith = np.clip(sin_zenith, 0.0, 1.0)  # Ensure valid range
+        zenith = np.arcsin(sin_zenith)
+        azimuth = np.arctan2(uy, ux)
+    else:
+        # Already in zenith, azimuth format
+        zenith, azimuth = val1, val2
     
     # Create figure with two subplots
     fig = plt.figure(figsize=figure_size)
@@ -386,7 +406,11 @@ def show_event_dual_plot(
     ax2 = fig.add_subplot(122, projection="3d")  # Right: npe
     
     # Title - Convert units
-    energy_pev = energy / 1e6  # MeV to PeV
+    # Energy: assume MeV if > 1000, otherwise assume PeV
+    if energy > 1000.0:
+        energy_pev = energy / 1e6  # MeV to PeV
+    else:
+        energy_pev = energy  # Already in PeV
     zenith_deg = np.degrees(zenith)  # rad to degrees
     azimuth_deg = np.degrees(azimuth)  # rad to degrees
     
