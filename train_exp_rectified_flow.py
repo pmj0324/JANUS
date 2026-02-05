@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Training script for GENESIS diffusion model with CFG, validation, and early stopping.
-Supports YAML configuration files.
+Training script for GENESIS using Rectified Flow Matching.
+Supports CFG, validation, and early stopping.
 """
 
 import math
@@ -25,11 +25,10 @@ import matplotlib.pyplot as plt
 # Add GENESIS to path
 sys.path.insert(0, os.path.join(os.getcwd(), "GENESIS"))
 from dataloader.h5 import H5Dataset
-from diffusion.schedules import sigmoid_beta_schedule, compute_alpha_schedule
-from diffusion.forward import apply_forward_diffusion
 from utils.normalize import normalize, denormalize_log_minmax, denormalize_minmax, apply_minmax_geo
 from utils.vis.event_show import show_event_dual_plot
 from utils.device import get_default_device
+from flow.rectified_flow import RectifiedFlow
 
 # ============================================================================
 # Configuration Parameters (can be overridden by YAML)
@@ -38,38 +37,34 @@ from utils.device import get_default_device
 # ============================================================================
 # Save Paths (모델과 플롯 저장 경로 지정) - 맨 앞에 위치
 # ============================================================================
-# 기본 출력 디렉토리 지정 (이 경로 아래에 models/와 plots/ 폴더가 자동 생성됨)
 output_dir = Path("./output")
-# 플롯 저장 활성화 여부 (False면 plots 폴더 생성 안 함)
 save_plots = True
-
-# Diffusion schedule
-T = 1000
-beta_start, beta_end = 1e-4, 2e-2  # sigmoid schedule params
 
 # Training
 batch_size = 256
 num_workers = 32
 lr = 3e-4
 num_epochs = 20
-val_ratio = 0.1  # 10% for validation
-val_every = 1  # validate every N epochs (항상 1로 설정 - ReduceLROnPlateau와 호환)
+val_ratio = 0.1
+val_every = 1
 
-# Learning rate scheduler (ReduceLROnPlateau)
-# 주의: step()은 매 epoch마다 호출하며, validation한 epoch에는 val_loss, 아니면 train_loss 사용.
-# val_every=1 권장. val_every>1이면 patience는 "validation 횟수" 기준이 됨 (patience*val_every epoch).
-lr_scheduler_patience = 5  # 개선 없을 때 step() 호출 횟수만큼 기다린 뒤 LR 감소
-lr_scheduler_factor = 0.5  # factor to reduce LR by
-lr_scheduler_min = 1e-6  # minimum learning rate
+# Learning rate scheduler
+lr_scheduler_patience = 5
+lr_scheduler_factor = 0.5
+lr_scheduler_min = 1e-6
 
 # Early stopping
-early_stopping_patience = 10  # epochs to wait before stopping
-early_stopping_min_delta = 1e-6  # minimum change to qualify as improvement
+early_stopping_patience = 10
+early_stopping_min_delta = 1e-6
 
 # Classifier-Free Guidance (CFG)
-use_cfg = True  # Enable CFG training (기본값: True)
-cfg_dropout = 0.1  # Probability to drop label (use null label) during training
-cfg_scale = 2.0  # CFG scale for inference (not used during training)
+use_cfg = True
+cfg_dropout = 0.1
+cfg_scale = 2.0
+
+# Flow Matching sampling
+sampling_method = "euler"  # "euler" or "rk4"
+sampling_steps = 50  # Number of ODE steps for sampling
 
 # Data normalization
 npe_clip = 1000.0
@@ -78,21 +73,21 @@ log_min = 0.0
 ftime_log_max = float(np.log1p(ftime_clip))
 _feature_range = (-1, 1)
 
-# Label normalization: [Energy, ux, uy, X, Y, Z]
+# Label normalization
 _label_methods = ["log_minmax", "identity", "identity", "minmax", "minmax", "minmax"]
 _label_feature_ranges = [_feature_range] * 6
 _ENERGY_PEV_MINMAX = {"min": 1.0, "max": 100.0}
 energy_log_min = float(np.log1p(_ENERGY_PEV_MINMAX["min"]))
 energy_log_max = float(np.log1p(_ENERGY_PEV_MINMAX["max"]))
 _LABEL_XYZ_MINMAX = [
-    {"min": -570.9000244140625, "max": 576.3699951171875},   # X
-    {"min": -521.0800170898438, "max": 509.5},               # Y
-    {"min": -509.8599853515625, "max": 506.0566711425781},   # Z
+    {"min": -570.9000244140625, "max": 576.3699951171875},
+    {"min": -521.0800170898438, "max": 509.5},
+    {"min": -509.8599853515625, "max": 506.0566711425781},
 ]
 _GEO_XYZ_MINMAX = [
-    {"min": -570.9000244140625, "max": 576.3699951171875},   # x
-    {"min": -521.0800170898438, "max": 509.5},               # y
-    {"min": -509.8599853515625, "max": 506.0566711425781},   # z
+    {"min": -570.9000244140625, "max": 576.3699951171875},
+    {"min": -521.0800170898438, "max": 509.5},
+    {"min": -509.8599853515625, "max": 506.0566711425781},
 ]
 geo_min = np.array([_GEO_XYZ_MINMAX[j]["min"] for j in range(3)], dtype=np.float32)
 geo_max = np.array([_GEO_XYZ_MINMAX[j]["max"] for j in range(3)], dtype=np.float32)
@@ -135,60 +130,45 @@ def load_config(config_path: str) -> dict:
 
 def apply_config(config: dict):
     """Apply configuration to global variables."""
-    global T, beta_start, beta_end
     global batch_size, num_workers, lr, num_epochs, val_ratio, val_every
     global lr_scheduler_patience, lr_scheduler_factor, lr_scheduler_min
     global early_stopping_patience, early_stopping_min_delta
     global use_cfg, cfg_dropout, cfg_scale
     global model_d_model, model_nhead, model_depth, model_mlp_ratio, model_dropout, model_label_dim
     global h5_path, output_dir, save_plots, seed, compile_model, print_every
+    global sampling_method, sampling_steps
     
-    # Diffusion
-    if 'diffusion' in config:
-        diff = config['diffusion']
-        if 'schedule' in diff:
-            sched = diff['schedule']
-            T = sched.get('timesteps', T)
-            beta_start = sched.get('beta_start', beta_start)
-            beta_end = sched.get('beta_end', beta_end)
-    
-    # Training
     if 'training' in config:
         train = config['training']
         num_epochs = train.get('nepochs', num_epochs)
         lr = train.get('lr', lr)
         batch_size = train.get('bsz', batch_size)
     
-    # Validation
     if 'val_ratio' in config:
         val_ratio = config['val_ratio']
     if 'val_every' in config:
         val_every_config = config['val_every']
         if val_every_config != 1:
             print(f"Warning: val_every={val_every_config} is set in config, but forcing to 1 for ReduceLROnPlateau compatibility")
-        val_every = 1  # 항상 1로 강제 설정
+        val_every = 1
     
-    # LR Scheduler
     if 'lr_scheduler' in config:
         lr_sched = config['lr_scheduler']
         lr_scheduler_patience = lr_sched.get('patience', lr_scheduler_patience)
         lr_scheduler_factor = lr_sched.get('factor', lr_scheduler_factor)
         lr_scheduler_min = lr_sched.get('min_lr', lr_scheduler_min)
     
-    # Early stopping
     if 'early_stopping' in config:
         es = config['early_stopping']
         early_stopping_patience = es.get('patience', early_stopping_patience)
         early_stopping_min_delta = es.get('min_delta', early_stopping_min_delta)
     
-    # CFG
     if 'cfg' in config:
         cfg = config['cfg']
         use_cfg = cfg.get('use_cfg', use_cfg)
         cfg_dropout = cfg.get('cfg_dropout', cfg_dropout)
         cfg_scale = cfg.get('cfg_scale', cfg_scale)
     
-    # Model
     if 'model' in config:
         model = config['model']
         if 'options' in model:
@@ -200,16 +180,13 @@ def apply_config(config: dict):
             model_dropout = opts.get('dropout', model_dropout)
             model_label_dim = opts.get('label_dim', model_label_dim)
     
-    # Data
     if 'data' in config:
         data = config['data']
         h5_path = data.get('h5_path', h5_path)
         num_workers = data.get('num_workers', num_workers)
     
-    # Paths - 저장 경로 설정
     if 'path' in config:
         output_dir = Path(config['path'])
-    
     if 'save_plots' in config:
         save_plots = config['save_plots']
     if 'seed' in config:
@@ -218,6 +195,11 @@ def apply_config(config: dict):
         compile_model = config['compile_model']
     if 'print_every' in config:
         print_every = config['print_every']
+    
+    if 'sampling' in config:
+        sampling = config['sampling']
+        sampling_method = sampling.get('method', sampling_method)
+        sampling_steps = sampling.get('steps', sampling_steps)
 
 
 def _print_label_normalize_config():
@@ -242,32 +224,24 @@ def _print_label_normalize_config():
 
 
 def _clamp_sig(sig: torch.Tensor) -> torch.Tensor:
-    """Clamp npe/ftime before normalize. Returns clamped copy."""
+    """Clamp npe/ftime before normalize."""
     s = sig.clone()
     s[:, 0] = torch.clamp(s[:, 0], min=0.0, max=npe_clip)
     s[:, 1] = torch.clamp(s[:, 1], min=0.0, max=ftime_clip)
     return s
 
 
-def sample_timesteps(batch: int, T: int, device: torch.device) -> torch.Tensor:
-    """t in [1, T] (t=0은 노이즈가 없는 원본이므로 학습에서 제외)"""
-    return torch.randint(low=1, high=T + 1, size=(batch,), device=device, dtype=torch.long)
-
-
 def get_null_label(batch_size: int, label_dim: int, device: torch.device) -> torch.Tensor:
-    """Create null label for CFG (unconditional generation)."""
+    """Create null label for CFG."""
     return torch.zeros(batch_size, label_dim, device=device)
 
 
 # ============================================================================
-# Model Definition
+# Model Definition (same as diffusion version)
 # ============================================================================
 
 def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
-    """
-    t: (B,) int/float
-    return: (B, dim)
-    """
+    """Time embedding for flow matching (t in [0, 1])."""
     if t.dim() != 1:
         t = t.view(-1)
     t = t.float()
@@ -275,25 +249,20 @@ def sinusoidal_timestep_embedding(t: torch.Tensor, dim: int, max_period: int = 1
     half = dim // 2
     freqs = torch.exp(
         -math.log(max_period) * torch.arange(0, half, device=t.device, dtype=torch.float32) / half
-    )  # (half,)
-    args = t[:, None] * freqs[None, :]  # (B, half)
-    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)  # (B, 2*half)
+    )
+    args = t[:, None] * freqs[None, :]
+    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2 == 1:
         emb = torch.cat([emb, torch.zeros((emb.shape[0], 1), device=t.device, dtype=emb.dtype)], dim=-1)
     return emb
 
 
 class DiTBlock(nn.Module):
-    """
-    DiT-style Transformer block with AdaLN modulation from conditioning vector c.
-    x: (B, L, d)
-    c: (B, d)
-    """
+    """DiT-style Transformer block."""
     def __init__(self, d: int, nhead: int, mlp_ratio: float = 4.0, dropout: float = 0.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(d, elementwise_affine=False)
         self.attn = nn.MultiheadAttention(d, nhead, dropout=dropout, batch_first=True)
-
         self.norm2 = nn.LayerNorm(d, elementwise_affine=False)
         hidden = int(d * mlp_ratio)
         self.mlp = nn.Sequential(
@@ -301,8 +270,6 @@ class DiTBlock(nn.Module):
             nn.GELU(),
             nn.Linear(hidden, d),
         )
-
-        # cond -> (shift1, scale1, gate1, shift2, scale2, gate2)
         self.ada = nn.Sequential(
             nn.SiLU(),
             nn.Linear(d, 6 * d),
@@ -312,26 +279,22 @@ class DiTBlock(nn.Module):
         B, L, d = x.shape
         params = self.ada(c).view(B, 6, d)
         shift1, scale1, gate1, shift2, scale2, gate2 = params[:, 0], params[:, 1], params[:, 2], params[:, 3], params[:, 4], params[:, 5]
-
-        # Attention
         x1 = self.norm1(x)
         x1 = x1 * (1.0 + scale1[:, None, :]) + shift1[:, None, :]
         attn_out, _ = self.attn(x1, x1, x1, need_weights=False)
         x = x + gate1[:, None, :] * attn_out
-
-        # MLP
         x2 = self.norm2(x)
         x2 = x2 * (1.0 + scale2[:, None, :]) + shift2[:, None, :]
         mlp_out = self.mlp(x2)
         x = x + gate2[:, None, :] * mlp_out
-
         return x
 
 
-class DiffusionDiTTransformer(nn.Module):
+class FlowDiTTransformer(nn.Module):
+    """DiT Transformer for Flow Matching (same architecture as diffusion version)."""
     def __init__(
         self,
-        geo: torch.Tensor,          # (3, 5160) or (1, 3, 5160)
+        geo: torch.Tensor,
         d_model: int = 256,
         nhead: int = 8,
         depth: int = 6,
@@ -342,12 +305,9 @@ class DiffusionDiTTransformer(nn.Module):
         super().__init__()
         self.d_model = d_model
 
-        # ---- geo buffer (고정) ----
-        # geo: (3, L) -> (1, L, 3)
         if geo.dim() == 2:
-            geo_tok = geo.transpose(0, 1).unsqueeze(0)  # (1, L, 3)
+            geo_tok = geo.transpose(0, 1).unsqueeze(0)
         elif geo.dim() == 3:
-            # (1, 3, L) -> (1, L, 3)
             geo_tok = geo.permute(0, 2, 1)
         else:
             raise ValueError(f"geo must be (3,L) or (1,3,L). got {geo.shape}")
@@ -356,10 +316,7 @@ class DiffusionDiTTransformer(nn.Module):
         L = self.geo_tokens.shape[1]
         self.L = L
 
-        # ---- input embedding: (B, L, 2) -> (B, L, d) ----
         self.in_proj = nn.Linear(2, d_model)
-
-        # ---- geo positional embedding: (1, L, 3) -> (1, L, d) ----
         self.geo_mlp = nn.Sequential(
             nn.Linear(3, d_model * 2),
             nn.SiLU(),
@@ -370,7 +327,6 @@ class DiffusionDiTTransformer(nn.Module):
         if self.use_index_pos:
             self.index_pos = nn.Parameter(torch.zeros(1, L, d_model))
 
-        # ---- conditioning: time + label -> (B, d) ----
         self.time_mlp = nn.Sequential(
             nn.Linear(d_model, d_model * 4),
             nn.SiLU(),
@@ -382,55 +338,48 @@ class DiffusionDiTTransformer(nn.Module):
             nn.Linear(d_model * 4, d_model),
         )
 
-        # ---- DiT blocks ----
         self.blocks = nn.ModuleList([
             DiTBlock(d_model, nhead, mlp_ratio=mlp_ratio, dropout=dropout)
             for _ in range(depth)
         ])
 
-        # ---- final layer (DiT 스타일로 마지막에도 cond로 LN modulation) ----
         self.final_norm = nn.LayerNorm(d_model, elementwise_affine=False)
         self.final_ada = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(d_model, 2 * d_model),  # shift, scale
+            nn.Linear(d_model, 2 * d_model),
         )
         self.out_proj = nn.Linear(d_model, 2)
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
         """
         x_t: (B, 2, L)
-        t: (B,)
+        t: (B,) in [0, 1] for flow matching
         label: (B, 6)
-        return: eps_hat (B, 2, L)
+        return: v_hat (B, 2, L) - velocity prediction
         """
         B, C, L = x_t.shape
         assert L == self.L, f"Expected L={self.L}, got L={L}"
 
-        # (B, 2, L) -> (B, L, 2)
         tokens = x_t.permute(0, 2, 1)
-        h = self.in_proj(tokens)  # (B, L, d)
+        h = self.in_proj(tokens)
 
-        # geo positional embedding
-        pos_geo = self.geo_mlp(self.geo_tokens)  # (1, L, d)
+        pos_geo = self.geo_mlp(self.geo_tokens)
         h = h + pos_geo
 
         if self.use_index_pos:
             h = h + self.index_pos
 
-        # conditioning
-        t_emb = sinusoidal_timestep_embedding(t, self.d_model)  # (B, d)
-        c = self.time_mlp(t_emb) + self.label_mlp(label)        # (B, d)
+        t_emb = sinusoidal_timestep_embedding(t, self.d_model)
+        c = self.time_mlp(t_emb) + self.label_mlp(label)
 
-        # DiT blocks
         for blk in self.blocks:
             h = blk(h, c)
 
-        # final AdaLN + output
-        shift, scale = self.final_ada(c).chunk(2, dim=-1)       # (B,d), (B,d)
+        shift, scale = self.final_ada(c).chunk(2, dim=-1)
         h = self.final_norm(h)
         h = h * (1.0 + scale[:, None, :]) + shift[:, None, :]
-        out = self.out_proj(h)                                   # (B, L, 2)
-        return out.permute(0, 2, 1)                             # (B, 2, L)
+        out = self.out_proj(h)
+        return out.permute(0, 2, 1)
 
 
 # ============================================================================
@@ -438,7 +387,7 @@ class DiffusionDiTTransformer(nn.Module):
 # ============================================================================
 
 _channel_stats = [
-    {"min": 0.0, "max": npe_clip},   # nPE: log 없이 minmax
+    {"min": 0.0, "max": npe_clip},
     {"log_min": log_min, "log_max": ftime_log_max},
 ]
 
@@ -455,15 +404,14 @@ _channel_stats = [
 def prepare_batch(
     sig: torch.Tensor, label: torch.Tensor, *, verbose: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """입력: (sig, label). 데코레이터가 sig는 [-1,1] log_minmax, label은 Energy log_minmax / ux,uy identity / X,Y,Z minmax.
-    출력: (sig_norm, label_norm). verbose=True면 print."""
+    """Prepare batch with normalization."""
     if verbose:
         print("prepare_batch: label", label)
     return (sig, label)
 
 
 def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
-    """정규화된 sig를 원 스케일로 역정규화. nPE는 minmax 역변환, FirstTime은 log_minmax 역변환."""
+    """Denormalize signal."""
     out = sig.clone()
     if sig.dim() == 3:
         out[:, 0, :] = denormalize_minmax(sig[:, 0, :], 0.0, npe_clip, _feature_range)
@@ -479,27 +427,23 @@ def denormalize_sig(sig: torch.Tensor) -> torch.Tensor:
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Train GENESIS diffusion model with CFG and validation")
+    parser = argparse.ArgumentParser(description="Train GENESIS with Rectified Flow Matching")
     parser.add_argument("-c", "--config", type=str, default=None, help="Path to YAML config file")
     args = parser.parse_args()
     
-    # Load config if provided
     if args.config:
         config = load_config(args.config)
         apply_config(config)
         print(f"Loaded configuration from: {args.config}")
     
-    # Set random seed
     torch.manual_seed(seed)
     np.random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     
-    # Device setup
     device = get_default_device()
     print("device:", device)
     
-    # Create output directories (기본 경로 아래에 models/와 plots/ 자동 생성)
     output_dir.mkdir(exist_ok=True, parents=True)
     model_save_dir = output_dir / "models"
     model_save_dir.mkdir(exist_ok=True, parents=True)
@@ -517,18 +461,15 @@ def main():
     else:
         print("Plot saving: disabled")
     
-    # Load dataset
     print(f"Loading dataset from: {h5_path}")
     dataset = H5Dataset(h5_path=h5_path)
     print(f"Dataset length: {len(dataset)}")
     
-    # Train/Val split
     val_size = int(len(dataset) * val_ratio)
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed))
     print(f"Train size: {train_size}, Val size: {val_size}")
     
-    # DataLoaders
     _print_label_normalize_config()
     
     train_loader = DataLoader(
@@ -553,18 +494,15 @@ def main():
         prefetch_factor=2 if num_workers > 0 else None,
     )
     
-    # Get sample data for shape info
     sig0, geo0, label0 = dataset[0]
     print("sig:", sig0.shape, sig0.dtype)
     print("geo:", geo0.shape, geo0.dtype)
     print("label:", label0.shape, label0.dtype)
     
-    # Setup geo (all samples use same geo)
-    _geo_raw = dataset[0][1]  # (3, L)
+    _geo_raw = dataset[0][1]
     _geo = apply_minmax_geo(_geo_raw, geo_min, geo_max, feature_range=(0, 1))
     
-    # Create model
-    model = DiffusionDiTTransformer(
+    model = FlowDiTTransformer(
         geo=_geo,
         d_model=model_d_model,
         nhead=model_nhead,
@@ -578,28 +516,23 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         print(f"[GPU] after model: {torch.cuda.memory_allocated() / 1e9:.3f} GB")
     
-    # Optimizer
     optim = torch.optim.AdamW(model.parameters(), lr=lr)
     
-    # Learning rate scheduler (ReduceLROnPlateau)
-    # verbose 파라미터는 deprecated되었으므로 제거 (LR 변경은 수동으로 출력)
     lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim,
         mode='min',
         factor=lr_scheduler_factor,
         patience=lr_scheduler_patience,
         min_lr=lr_scheduler_min,
-        verbose=False  # deprecated 파라미터 제거
+        verbose=False
     )
     
-    # AMP
     try:
         scaler = GradScaler(device.type) if device.type in ("cuda", "mps") else None
     except (TypeError, ValueError):
         scaler = GradScaler() if device.type == "cuda" else None
     print("AMP enabled:", scaler is not None)
     
-    # Compile model
     if compile_model:
         try:
             if hasattr(torch, 'compile'):
@@ -613,15 +546,11 @@ def main():
     
     print("params:", sum(p.numel() for p in model.parameters())/1e6, "M")
     print(f"CFG enabled: {use_cfg} (dropout={cfg_dropout}, scale={cfg_scale})")
+    print(f"Sampling method: {sampling_method}, steps: {sampling_steps}")
     
-    # Noise schedule
-    betas = sigmoid_beta_schedule(timesteps=T, beta_start=beta_start, beta_end=beta_end).to(device)
-    alpha_schedule = compute_alpha_schedule(betas)
-    alphas = alpha_schedule["alphas"]
-    alphas_cumprod = alpha_schedule["alphas_cumprod"]
-    print("betas:", betas.shape, betas.min().item(), betas.max().item())
+    # Initialize Rectified Flow
+    flow_matching = RectifiedFlow()
     
-    # Training loop
     model.train()
     
     train_loss_hist = []
@@ -634,10 +563,10 @@ def main():
     val_steps_per_epoch = len(val_loader)
     total_steps = num_epochs * steps_per_epoch
     
-    # Print training configuration summary
     print("\n" + "="*60)
     print("Training Configuration Summary")
     print("="*60)
+    print(f"Method: Rectified Flow Matching")
     print(f"Epochs: {num_epochs}")
     print(f"Batch size: {batch_size}")
     print(f"Initial LR: {lr:.2e}")
@@ -651,7 +580,6 @@ def main():
     print("="*60 + "\n")
     
     for epoch in range(1, num_epochs + 1):
-        # Training phase
         model.train()
         epoch_train_losses = []
         
@@ -661,7 +589,6 @@ def main():
             sig = sig.to(device, non_blocking=True)
             label = label.to(device, non_blocking=True)
             
-            # CFG: randomly replace label with null label
             if use_cfg:
                 mask = torch.rand(label.shape[0], device=device) < cfg_dropout
                 label_cfg = label.clone()
@@ -673,15 +600,23 @@ def main():
             x0, label_norm = prepare_batch(sig_clamp, label_cfg)
             
             B = x0.shape[0]
-            t = sample_timesteps(B, T, device)
             
-            noise = torch.randn_like(x0)
-            x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
+            # Flow Matching: sample time t ~ U(0, 1)
+            t = torch.rand(B, device=device, dtype=torch.float32)
             
-            # Forward pass
+            # Sample noise x_1 ~ N(0, I)
+            x1 = torch.randn_like(x0)
+            
+            # Compute path x_t
+            x_t = flow_matching.compute_path(x0, x1, t)
+            
+            # Compute ground truth velocity
+            v_true = flow_matching.compute_velocity(x0, x1, x_t, t)
+            
+            # Forward pass: predict velocity
             with autocast(device.type, enabled=(scaler is not None)):
-                eps_hat = model(x_t, t, label_norm)
-                loss = F.mse_loss(eps_hat, noise)
+                v_pred = model(x_t, t, label_norm)
+                loss = flow_matching.compute_loss(v_pred, v_true)
             
             # Backward pass
             optim.zero_grad(set_to_none=True)
@@ -703,8 +638,8 @@ def main():
             current_step = (epoch - 1) * steps_per_epoch + batch_idx
             avg_loss_so_far = np.mean(epoch_train_losses)
             pbar.set_postfix({"loss": f"{avg_loss_so_far:.6f}", "lr": f"{optim.param_groups[0]['lr']:.2e}"})
-            pbar.refresh()  # 강제로 출력 업데이트
-            sys.stdout.flush()  # 출력 버퍼 플러시
+            pbar.refresh()
+            sys.stdout.flush()
         
         epoch_train_loss = np.mean(epoch_train_losses)
         
@@ -723,42 +658,37 @@ def main():
                     x0, label_norm = prepare_batch(sig_clamp, label)
                     
                     B = x0.shape[0]
-                    t = sample_timesteps(B, T, device)
-                    
-                    noise = torch.randn_like(x0)
-                    x_t = apply_forward_diffusion(x0=x0, betas=betas, timesteps=t, noise=noise)
+                    t = torch.rand(B, device=device, dtype=torch.float32)
+                    x1 = torch.randn_like(x0)
+                    x_t = flow_matching.compute_path(x0, x1, t)
+                    v_true = flow_matching.compute_velocity(x0, x1, x_t, t)
                     
                     with autocast(device.type, enabled=(scaler is not None)):
-                        eps_hat = model(x_t, t, label_norm)
-                        loss = F.mse_loss(eps_hat, noise)
+                        v_pred = model(x_t, t, label_norm)
+                        loss = flow_matching.compute_loss(v_pred, v_true)
                     
                     loss_val = float(loss.item())
                     epoch_val_losses.append(loss_val)
-                    # Update progress bar with current batch loss
                     val_pbar.set_postfix({"loss": f"{loss_val:.6f}"})
-                    val_pbar.refresh()  # 강제로 출력 업데이트
-                    sys.stdout.flush()  # 출력 버퍼 플러시
+                    val_pbar.refresh()
+                    sys.stdout.flush()
             
             epoch_val_loss = np.mean(epoch_val_losses)
             val_loss_hist.append(epoch_val_loss)
             
-            # Update LR scheduler (validation epoch: use val_loss)
             old_lr = optim.param_groups[0]['lr']
             lr_scheduler.step(epoch_val_loss)
             new_lr = optim.param_groups[0]['lr']
             lr_reduced = (old_lr != new_lr)
             
-            # LR 감소 시 명시적으로 출력 (verbose 파라미터 대신)
             if lr_reduced:
                 print(f"\n[LR Scheduler] Learning rate reduced: {old_lr:.2e} -> {new_lr:.2e}")
             
-            # Check for improvement
             improvement = best_val_loss - epoch_val_loss
             if improvement > early_stopping_min_delta:
                 best_val_loss = epoch_val_loss
                 epochs_without_improvement = 0
                 
-                # Save best model
                 if best_checkpoint_path is not None and best_checkpoint_path.exists():
                     best_checkpoint_path.unlink()
                 
@@ -770,12 +700,6 @@ def main():
                     "train_loss": epoch_train_loss,
                     "val_loss": epoch_val_loss,
                     "best_val_loss": best_val_loss,
-                    "betas": betas.cpu(),
-                    "alphas": alphas.cpu(),
-                    "alphas_cumprod": alphas_cumprod.cpu(),
-                    "T": T,
-                    "beta_start": beta_start,
-                    "beta_end": beta_end,
                     "d_model": model_d_model,
                     "nhead": model_nhead,
                     "depth": model_depth,
@@ -785,6 +709,8 @@ def main():
                     "use_cfg": use_cfg,
                     "cfg_dropout": cfg_dropout,
                     "cfg_scale": cfg_scale,
+                    "sampling_method": sampling_method,
+                    "sampling_steps": sampling_steps,
                 }
                 torch.save(checkpoint, best_checkpoint_path)
                 print(f"\n✓ New best model saved: {best_checkpoint_path.name}")
@@ -798,19 +724,15 @@ def main():
             print(f"{lr_msg} | Epochs without improvement: {epochs_without_improvement}/{early_stopping_patience}")
             print("-"*60)
             
-            # Early stopping check
             if epochs_without_improvement >= early_stopping_patience:
                 print(f"\nEarly stopping triggered after {epoch} epochs (no improvement for {early_stopping_patience} epochs)")
                 break
         else:
-            # Validation 없음: 스케줄러는 호출하지 않음 (val_loss만 사용하므로).
-            # val_every=1 권장. val_every>1이면 patience는 "validation 횟수" 기준 (실제 대기 = patience * val_every epoch).
             print(f"\nEpoch {epoch:3d}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | LR: {optim.param_groups[0]['lr']:.2e}")
             print("-"*60)
     
     print("\nTraining done!")
     
-    # Save final model
     final_checkpoint_path = model_save_dir / "model_checkpoint_final.pt"
     checkpoint = {
         "model_state_dict": model.state_dict(),
@@ -819,12 +741,6 @@ def main():
         "final_train_loss": train_loss_hist[-1] if train_loss_hist else None,
         "final_val_loss": val_loss_hist[-1] if val_loss_hist else None,
         "best_val_loss": best_val_loss,
-        "betas": betas.cpu(),
-        "alphas": alphas.cpu(),
-        "alphas_cumprod": alphas_cumprod.cpu(),
-        "T": T,
-        "beta_start": beta_start,
-        "beta_end": beta_end,
         "d_model": model_d_model,
         "nhead": model_nhead,
         "depth": model_depth,
@@ -834,13 +750,15 @@ def main():
         "use_cfg": use_cfg,
         "cfg_dropout": cfg_dropout,
         "cfg_scale": cfg_scale,
+        "sampling_method": sampling_method,
+        "sampling_steps": sampling_steps,
     }
     torch.save(checkpoint, final_checkpoint_path)
     print(f"Final model saved to: {final_checkpoint_path}")
     if best_checkpoint_path:
         print(f"Best model (val_loss={best_val_loss:.6f}) saved to: {best_checkpoint_path.name}")
     
-    # Sampling with corrected indexing
+    # Sampling
     print("\n" + "="*60)
     print("Sampling from trained model...")
     print("="*60)
@@ -857,59 +775,33 @@ def main():
         num_samples = 1
         B = num_samples
         
-        # x_T ~ N(0, I)로 시작 (정규화된 공간)
-        x = torch.randn(B, 2, model.L, device=device)
+        # Start from noise
+        x1 = torch.randn(B, 2, model.L, device=device)
         
-        # DDPM 역확산: T -> 1 (인덱싱 수정)
-        print("Running reverse diffusion (T -> 1)...")
-        sampling_pbar = tqdm(reversed(range(1, T + 1)), total=T, desc="Sampling progress")
-        for t_val in sampling_pbar:
-            t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
-            
-            # CFG for sampling (if enabled)
-            if use_cfg:
-                # Unconditional prediction
-                with autocast(device.type, enabled=(scaler is not None)):
-                    eps_uncond = model(x, t_batch, get_null_label(B, model_label_dim, device))
-                # Conditional prediction
-                with autocast(device.type, enabled=(scaler is not None)):
-                    eps_cond = model(x, t_batch, label_ref_norm)
-                # CFG combination
-                eps_hat = eps_uncond + cfg_scale * (eps_cond - eps_uncond)
-            else:
-                with autocast(device.type, enabled=(scaler is not None)):
-                    eps_hat = model(x, t_batch, label_ref_norm)
-            
-            # DDPM 업데이트 (인덱싱 수정: t_val는 1~T, 인덱스는 0~T-1)
-            idx = t_val - 1  # t_val=1000 -> idx=999, t_val=1 -> idx=0
-            alpha_t = alphas[idx]
-            alpha_bar_t = alphas_cumprod[idx]
-            
-            # 평균 계산
-            mean = (1.0 / torch.sqrt(alpha_t)) * (
-                x - (betas[idx] / torch.sqrt(1.0 - alpha_bar_t)) * eps_hat
-            )
-            
-            # 분산 계산
-            if t_val > 1:
-                alpha_bar_prev = alphas_cumprod[idx - 1]  # idx > 0이므로 안전
-                posterior_variance = betas[idx] * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
-                var = torch.sqrt(posterior_variance)
-                noise = torch.randn_like(x)
-                x = mean + var * noise
-            else:
-                # t=1: 최종 단계
-                x = mean
-            
-            # Update progress bar
-            if t_val % 100 == 0 or t_val <= 10:
-                sampling_pbar.set_postfix({
-                    "t": t_val,
-                    "mean": f"{x.mean().item():.4f}",
-                    "std": f"{x.std().item():.4f}"
-                })
+        print(f"Running ODE solver ({sampling_method}, {sampling_steps} steps)...")
         
-        # 샘플 역정규화
+        # CFG for sampling
+        if use_cfg:
+            # Unconditional
+            if sampling_method == "euler":
+                x_uncond = flow_matching.sample_ode_euler(model, x1, sampling_steps, None, device)
+            else:
+                x_uncond = flow_matching.sample_ode_rk4(model, x1, sampling_steps, None, device)
+            
+            # Conditional
+            if sampling_method == "euler":
+                x_cond = flow_matching.sample_ode_euler(model, x1, sampling_steps, label_ref_norm, device)
+            else:
+                x_cond = flow_matching.sample_ode_rk4(model, x1, sampling_steps, label_ref_norm, device)
+            
+            # CFG combination
+            x = x_uncond + cfg_scale * (x_cond - x_uncond)
+        else:
+            if sampling_method == "euler":
+                x = flow_matching.sample_ode_euler(model, x1, sampling_steps, label_ref_norm, device)
+            else:
+                x = flow_matching.sample_ode_rk4(model, x1, sampling_steps, label_ref_norm, device)
+        
         samples_denorm = denormalize_sig(x)
         sample_np = samples_denorm[0].detach().cpu().numpy()
         
@@ -918,7 +810,6 @@ def main():
         print(f"Sample nPE range: [{sample_np[0].min():.2f}, {sample_np[0].max():.2f}]")
         print(f"Sample FirstTime range: [{sample_np[1].min():.2f}, {sample_np[1].max():.2f}]")
         
-        # Save sample plot if plot_save_dir is set
         if plot_save_dir is not None:
             geo_ref_np = geo_ref_raw.detach().cpu().numpy()
             label_ref_np = label_ref_raw.detach().cpu().numpy()
@@ -933,7 +824,7 @@ def main():
                 marker_size=8.0,
                 show_detector_hull=True,
                 show=False,
-                title_prefix=f"train_exp_new_cfg.py | Sampled data | using label from event {ref_idx}",
+                title_prefix=f"Rectified Flow | Sampled data | using label from event {ref_idx}",
                 firsttime_title="FirstTime (sampled)",
                 npe_title="nPE (sampled)",
             )
