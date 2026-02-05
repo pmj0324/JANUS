@@ -55,10 +55,12 @@ num_workers = 32
 lr = 3e-4
 num_epochs = 20
 val_ratio = 0.1  # 10% for validation
-val_every = 1  # validate every N epochs
+val_every = 1  # validate every N epochs (항상 1로 설정 - ReduceLROnPlateau와 호환)
 
 # Learning rate scheduler (ReduceLROnPlateau)
-lr_scheduler_patience = 5  # epochs to wait before reducing LR
+# 주의: step()은 매 epoch마다 호출하며, validation한 epoch에는 val_loss, 아니면 train_loss 사용.
+# val_every=1 권장. val_every>1이면 patience는 "validation 횟수" 기준이 됨 (patience*val_every epoch).
+lr_scheduler_patience = 5  # 개선 없을 때 step() 호출 횟수만큼 기다린 뒤 LR 감소
 lr_scheduler_factor = 0.5  # factor to reduce LR by
 lr_scheduler_min = 1e-6  # minimum learning rate
 
@@ -67,7 +69,7 @@ early_stopping_patience = 10  # epochs to wait before stopping
 early_stopping_min_delta = 1e-6  # minimum change to qualify as improvement
 
 # Classifier-Free Guidance (CFG)
-use_cfg = False  # Enable CFG training
+use_cfg = True  # Enable CFG training (기본값: True)
 cfg_dropout = 0.1  # Probability to drop label (use null label) during training
 cfg_scale = 2.0  # CFG scale for inference (not used during training)
 
@@ -163,7 +165,10 @@ def apply_config(config: dict):
     if 'val_ratio' in config:
         val_ratio = config['val_ratio']
     if 'val_every' in config:
-        val_every = config['val_every']
+        val_every_config = config['val_every']
+        if val_every_config != 1:
+            print(f"Warning: val_every={val_every_config} is set in config, but forcing to 1 for ReduceLROnPlateau compatibility")
+        val_every = 1  # 항상 1로 강제 설정
     
     # LR Scheduler
     if 'lr_scheduler' in config:
@@ -608,7 +613,7 @@ def main():
             print(f"Model compilation failed (continuing without compile): {e}")
     
     print("params:", sum(p.numel() for p in model.parameters())/1e6, "M")
-    print(f"CFG enabled: {use_cfg} (dropout={cfg_dropout})")
+    print(f"CFG enabled: {use_cfg} (dropout={cfg_dropout}, scale={cfg_scale})")
     
     # Noise schedule
     betas = sigmoid_beta_schedule(timesteps=T, beta_start=beta_start, beta_end=beta_end).to(device)
@@ -627,10 +632,24 @@ def main():
     epochs_without_improvement = 0
     
     steps_per_epoch = len(train_loader)
+    val_steps_per_epoch = len(val_loader)
     total_steps = num_epochs * steps_per_epoch
     
-    print(f"Training for {num_epochs} epochs ({steps_per_epoch} batches per epoch, {total_steps} total steps)")
+    # Print training configuration summary
+    print("\n" + "="*60)
+    print("Training Configuration Summary")
     print("="*60)
+    print(f"Epochs: {num_epochs}")
+    print(f"Batch size: {batch_size}")
+    print(f"Initial LR: {lr:.2e}")
+    print(f"LR Scheduler: ReduceLROnPlateau (patience={lr_scheduler_patience}, factor={lr_scheduler_factor})")
+    print(f"Early Stopping: patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
+    print(f"Train batches per epoch: {steps_per_epoch}")
+    print(f"Val batches per epoch: {val_steps_per_epoch}")
+    print(f"Total training steps: {total_steps}")
+    print("="*60)
+    print(f"\nStarting training for {num_epochs} epochs...")
+    print("="*60 + "\n")
     
     for epoch in range(1, num_epochs + 1):
         # Training phase
@@ -712,13 +731,19 @@ def main():
                         eps_hat = model(x_t, t, label_norm)
                         loss = F.mse_loss(eps_hat, noise)
                     
-                    epoch_val_losses.append(float(loss.item()))
+                    loss_val = float(loss.item())
+                    epoch_val_losses.append(loss_val)
+                    # Update progress bar with current batch loss
+                    val_pbar.set_postfix({"loss": f"{loss_val:.6f}"})
             
             epoch_val_loss = np.mean(epoch_val_losses)
             val_loss_hist.append(epoch_val_loss)
             
-            # Update LR scheduler
+            # Update LR scheduler (validation epoch: use val_loss)
+            old_lr = optim.param_groups[0]['lr']
             lr_scheduler.step(epoch_val_loss)
+            new_lr = optim.param_groups[0]['lr']
+            lr_reduced = (old_lr != new_lr)
             
             # Check for improvement
             improvement = best_val_loss - epoch_val_loss
@@ -760,7 +785,10 @@ def main():
                 epochs_without_improvement += 1
             
             print(f"\nEpoch {epoch:3d}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f} | Best Val: {best_val_loss:.6f}")
-            print(f"LR: {optim.param_groups[0]['lr']:.2e} | Epochs without improvement: {epochs_without_improvement}/{early_stopping_patience}")
+            lr_msg = f"LR: {optim.param_groups[0]['lr']:.2e}"
+            if lr_reduced:
+                lr_msg += f" (reduced from {old_lr:.2e})"
+            print(f"{lr_msg} | Epochs without improvement: {epochs_without_improvement}/{early_stopping_patience}")
             print("-"*60)
             
             # Early stopping check
@@ -768,7 +796,9 @@ def main():
                 print(f"\nEarly stopping triggered after {epoch} epochs (no improvement for {early_stopping_patience} epochs)")
                 break
         else:
-            print(f"\nEpoch {epoch:3d}/{num_epochs} | Train Loss: {epoch_train_loss:.6f}")
+            # Validation 없음: 스케줄러는 호출하지 않음 (val_loss만 사용하므로).
+            # val_every=1 권장. val_every>1이면 patience는 "validation 횟수" 기준 (실제 대기 = patience * val_every epoch).
+            print(f"\nEpoch {epoch:3d}/{num_epochs} | Train Loss: {epoch_train_loss:.6f} | LR: {optim.param_groups[0]['lr']:.2e}")
             print("-"*60)
     
     print("\nTraining done!")
@@ -825,7 +855,8 @@ def main():
         
         # DDPM 역확산: T -> 1 (인덱싱 수정)
         print("Running reverse diffusion (T -> 1)...")
-        for t_val in reversed(range(1, T + 1)):
+        sampling_pbar = tqdm(reversed(range(1, T + 1)), total=T, desc="Sampling progress")
+        for t_val in sampling_pbar:
             t_batch = torch.full((B,), t_val, device=device, dtype=torch.long)
             
             # CFG for sampling (if enabled)
@@ -863,14 +894,19 @@ def main():
                 # t=1: 최종 단계
                 x = mean
             
+            # Update progress bar
             if t_val % 100 == 0 or t_val <= 10:
-                print(f"  t={t_val:4d} | x_norm: mean={x.mean().item():.4f}, std={x.std().item():.4f}")
+                sampling_pbar.set_postfix({
+                    "t": t_val,
+                    "mean": f"{x.mean().item():.4f}",
+                    "std": f"{x.std().item():.4f}"
+                })
         
         # 샘플 역정규화
         samples_denorm = denormalize_sig(x)
         sample_np = samples_denorm[0].detach().cpu().numpy()
         
-        print("Sampling completed!")
+        print("\nSampling completed!")
         print(f"Sample shape: {sample_np.shape}")
         print(f"Sample nPE range: [{sample_np[0].min():.2f}, {sample_np[0].max():.2f}]")
         print(f"Sample FirstTime range: [{sample_np[1].min():.2f}, {sample_np[1].max():.2f}]")

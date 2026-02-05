@@ -5,13 +5,13 @@ seed: 42
 
 # Classifier-Free Guidance (CFG)
 cfg:
-  use_cfg: false          # Enable CFG training (set to true to enable)
+  use_cfg: true           # Enable CFG training (기본값: true)
   cfg_scale: 2.0          # CFG scale for inference
   cfg_dropout: 0.1        # Probability to drop label during training
 
 # Validation
 val_ratio: 0.1            # Fraction of dataset for validation (10%)
-val_every: 1              # Compute val loss every N epochs
+val_every: 1              # Compute val loss every N epochs (항상 1로 설정 - ReduceLROnPlateau와 호환)
 
 # Learning rate scheduler (ReduceLROnPlateau)
 lr_scheduler:
