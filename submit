@@ -1,0 +1,17 @@
+Executable      = ./run_model.sh
+arguments       = $(ProcId)
+Universe        = vanilla
+
+base_path       =  .
+
+Error           = $(base_path)/$(Cluster)err.txt
+Output          = $(base_path)/$(Cluster)out.txt
+Log             = $(base_path)/$(Cluster)log.txt
+
+request_cpus    = 4
+request_gpus    = 1
+request_memory  = 4096M
+request_disk    = 500M
+Requirements    = Machine != "gpu01.sscc.uos"
+getenv     = True
+Queue 1

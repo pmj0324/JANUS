@@ -134,43 +134,172 @@ def plot_histogram(
     title_suffix: str = "",
     cut_npe: float = 0.0,
     cut_firsttime: float = 0.0,
+    log_scale: bool = False,
 ):
     npe = sig[0]
     ftime = sig[1]
     # inf/nan 제외 (샘플에서 FirstTime 등이 inf 나올 수 있음)
     npe_plot = npe[(npe > cut_npe) & np.isfinite(npe)]
     ftime_plot = ftime[(ftime > cut_firsttime) & np.isfinite(ftime)]
+    n_npe = len(npe_plot)
+    n_ftime = len(ftime_plot)
+
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(f"Histogram{title_suffix}  |  cut_npe > {cut_npe} (N={n_npe})  |  cut_firsttime > {cut_firsttime} (N={n_ftime})" + ("  [log scale]" if log_scale else ""), fontsize=11)
+
+    # Left: FirstTime
     ax1 = axes[0]
-    if len(npe_plot) > 0:
-        ax1.hist(npe_plot, bins=50, alpha=0.7, color='blue', edgecolor='black')
-        ax1.set_xlabel('nPE')
+    if len(ftime_plot) > 0:
+        ax1.hist(ftime_plot, bins=50, alpha=0.7, color='orange', edgecolor='black')
+        ax1.set_xlabel('FirstTime')
         ax1.set_ylabel('Frequency')
-        ax1.set_title(f'nPE Distribution{title_suffix}')
+        ax1.set_title(f'FirstTime  |  cut > {cut_firsttime}, N = {n_ftime}')
+        if log_scale:
+            ax1.set_yscale('log')
+            ax1.set_ylim(bottom=0.5)
         ax1.grid(True, alpha=0.3)
-        ax1.axvline(npe_plot.mean(), color='red', linestyle='--', label=f'Mean: {npe_plot.mean():.2f}')
-        ax1.axvline(np.median(npe_plot), color='green', linestyle='--', label=f'Median: {np.median(npe_plot):.2f}')
+        ax1.axvline(ftime_plot.mean(), color='red', linestyle='--', label=f'Mean: {ftime_plot.mean():.2f}')
+        ax1.axvline(np.median(ftime_plot), color='green', linestyle='--', label=f'Median: {np.median(ftime_plot):.2f}')
         ax1.legend()
     else:
-        ax1.text(0.5, 0.5, 'No nPE above cut', ha='center', va='center', transform=ax1.transAxes)
-        ax1.set_title(f'nPE Distribution{title_suffix} (empty)')
+        ax1.text(0.5, 0.5, 'No FirstTime above cut', ha='center', va='center', transform=ax1.transAxes)
+        ax1.set_title(f'FirstTime  |  cut > {cut_firsttime}, N = 0 (empty)')
+    # Right: nPE
     ax2 = axes[1]
-    if len(ftime_plot) > 0:
-        ax2.hist(ftime_plot, bins=50, alpha=0.7, color='orange', edgecolor='black')
-        ax2.set_xlabel('FirstTime')
+    if len(npe_plot) > 0:
+        ax2.hist(npe_plot, bins=50, alpha=0.7, color='blue', edgecolor='black')
+        ax2.set_xlabel('nPE')
         ax2.set_ylabel('Frequency')
-        ax2.set_title(f'FirstTime Distribution{title_suffix}')
+        ax2.set_title(f'nPE  |  cut > {cut_npe}, N = {n_npe}')
+        if log_scale:
+            ax2.set_yscale('log')
+            ax2.set_ylim(bottom=0.5)
         ax2.grid(True, alpha=0.3)
-        ax2.axvline(ftime_plot.mean(), color='red', linestyle='--', label=f'Mean: {ftime_plot.mean():.2f}')
-        ax2.axvline(np.median(ftime_plot), color='green', linestyle='--', label=f'Median: {np.median(ftime_plot):.2f}')
+        ax2.axvline(npe_plot.mean(), color='red', linestyle='--', label=f'Mean: {npe_plot.mean():.2f}')
+        ax2.axvline(np.median(npe_plot), color='green', linestyle='--', label=f'Median: {np.median(npe_plot):.2f}')
         ax2.legend()
     else:
-        ax2.text(0.5, 0.5, 'No FirstTime above cut', ha='center', va='center', transform=ax2.transAxes)
-        ax2.set_title(f'FirstTime Distribution{title_suffix} (empty)')
+        ax2.text(0.5, 0.5, 'No nPE above cut', ha='center', va='center', transform=ax2.transAxes)
+        ax2.set_title(f'nPE  |  cut > {cut_npe}, N = 0 (empty)')
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"  Saved histogram: {output_path}")
+
+
+def plot_histogram_combined(
+    sig_actual: np.ndarray,
+    sig_sampled: np.ndarray,
+    output_path: Path,
+    title_suffix: str = "",
+    cut_npe: float = 0.0,
+    cut_firsttime: float = 0.0,
+    log_scale: bool = False,
+):
+    """Overlay actual and sampled histograms: left=FirstTime, right=nPE. Actual uses cut 0,0; sampled uses cut_npe, cut_firsttime."""
+    # Actual: no cut for display (or use 0,0)
+    ftime_act = sig_actual[1][np.isfinite(sig_actual[1])]
+    npe_act = sig_actual[0][np.isfinite(sig_actual[0])]
+    ftime_samp = sig_sampled[1][(sig_sampled[1] > cut_firsttime) & np.isfinite(sig_sampled[1])]
+    npe_samp = sig_sampled[0][(sig_sampled[0] > cut_npe) & np.isfinite(sig_sampled[0])]
+    n_ftime_act, n_npe_act = len(ftime_act), len(npe_act)
+    n_ftime_samp, n_npe_samp = len(ftime_samp), len(npe_samp)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(
+        f"Combined Histogram (Actual vs Sampled){title_suffix}  |  cut_npe > {cut_npe} (Actual N={n_npe_act}, Sampled N={n_npe_samp})  |  cut_firsttime > {cut_firsttime} (Actual N={n_ftime_act}, Sampled N={n_ftime_samp})" + ("  [log scale]" if log_scale else ""),
+        fontsize=10,
+    )
+
+    # Left: FirstTime (overlaid, count)
+    ax1 = axes[0]
+    if n_ftime_act > 0 or n_ftime_samp > 0:
+        bins_ftime = 50
+        if n_ftime_act > 0:
+            ax1.hist(ftime_act, bins=bins_ftime, alpha=0.5, color="blue", edgecolor="navy", label=f"Actual (N={n_ftime_act})")
+        if n_ftime_samp > 0:
+            ax1.hist(ftime_samp, bins=bins_ftime, alpha=0.5, color="orange", edgecolor="darkorange", label=f"Sampled (N={n_ftime_samp})")
+        ax1.set_xlabel("FirstTime")
+        ax1.set_ylabel("Count")
+        ax1.set_title(f"FirstTime  |  cut > {cut_firsttime}")
+        if log_scale:
+            ax1.set_yscale('log')
+            ax1.set_ylim(bottom=0.5)
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+    else:
+        ax1.set_title(f"FirstTime  |  cut > {cut_firsttime} (no data)")
+    # Right: nPE (overlaid, count)
+    ax2 = axes[1]
+    if n_npe_act > 0 or n_npe_samp > 0:
+        bins_npe = 50
+        if n_npe_act > 0:
+            ax2.hist(npe_act, bins=bins_npe, alpha=0.5, color="blue", edgecolor="navy", label=f"Actual (N={n_npe_act})")
+        if n_npe_samp > 0:
+            ax2.hist(npe_samp, bins=bins_npe, alpha=0.5, color="orange", edgecolor="darkorange", label=f"Sampled (N={n_npe_samp})")
+        ax2.set_xlabel("nPE")
+        ax2.set_ylabel("Count")
+        ax2.set_title(f"nPE  |  cut > {cut_npe}")
+        if log_scale:
+            ax2.set_yscale('log')
+            ax2.set_ylim(bottom=0.5)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+    else:
+        ax2.set_title(f"nPE  |  cut > {cut_npe} (no data)")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved combined histogram: {output_path}")
+
+
+def plot_histogram_noclip(
+    sig_normalized: np.ndarray,
+    output_path: Path,
+    title_suffix: str = "",
+    log_scale: bool = False,
+):
+    """Histogram of model output before denormalize and before clip (normalized space). Left: channel 1 (FirstTime norm), Right: channel 0 (nPE norm)."""
+    ch0 = sig_normalized[0][np.isfinite(sig_normalized[0])]
+    ch1 = sig_normalized[1][np.isfinite(sig_normalized[1])]
+    n0, n1 = len(ch0), len(ch1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(
+        f"Histogram (pre-denorm, pre-clip, normalized){title_suffix}  |  ch0 (nPE norm) N={n0}  |  ch1 (FirstTime norm) N={n1}" + ("  [log scale]" if log_scale else ""),
+        fontsize=10,
+    )
+
+    # Left: channel 1 (FirstTime normalized)
+    ax1 = axes[0]
+    if n1 > 0:
+        ax1.hist(ch1, bins=50, alpha=0.7, color="orange", edgecolor="black")
+        ax1.set_xlabel("FirstTime (normalized)")
+        ax1.set_ylabel("Count")
+        ax1.set_title(f"ch1 (FirstTime norm), N = {n1}")
+        if log_scale:
+            ax1.set_yscale('log')
+            ax1.set_ylim(bottom=0.5)
+        ax1.grid(True, alpha=0.3)
+    else:
+        ax1.set_title("ch1 (FirstTime norm), N = 0 (empty)")
+    # Right: channel 0 (nPE normalized)
+    ax2 = axes[1]
+    if n0 > 0:
+        ax2.hist(ch0, bins=50, alpha=0.7, color="blue", edgecolor="black")
+        ax2.set_xlabel("nPE (normalized)")
+        ax2.set_ylabel("Count")
+        ax2.set_title(f"ch0 (nPE norm), N = {n0}")
+        if log_scale:
+            ax2.set_yscale('log')
+            ax2.set_ylim(bottom=0.5)
+        ax2.grid(True, alpha=0.3)
+    else:
+        ax2.set_title("ch0 (nPE norm), N = 0 (empty)")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved histogram (noclip): {output_path}")
 
 
 def remove_orig_mod_prefix(state_dict: dict) -> dict:
@@ -255,6 +384,10 @@ def sample(
     use_cfg: bool = False,
     cfg_scale: float = 2.0,
     null_label_norm: torch.Tensor = None,
+    sig_actual_np: np.ndarray = None,
+    histogram_combined: bool = False,
+    histogram_noclip: bool = False,
+    histogram_log: bool = False,
 ):
     if device is None:
         device = next(model.parameters()).device
@@ -298,6 +431,7 @@ def sample(
                 x = mean
             pbar.set_postfix({"t": t_val, "mean": f"{x.mean().item():.4f}", "std": f"{x.std().item():.4f}"})
 
+    x_np_raw = x.detach().cpu().numpy()  # (B, 2, L) before denorm, for histogram_noclip
     samples_denorm = denormalize_sig(x)
     samples_np = samples_denorm.detach().cpu().numpy()
     del x, samples_denorm, label_norm
@@ -342,7 +476,22 @@ def sample(
                 print(f"  Saved image: {img_output_path}")
             if save_histogram:
                 hist_output_path = output_dir / f"sampled_event_{ref_idx}_sample_{i+1:03d}_histogram.png"
-                plot_histogram(sample_np, hist_output_path, title_suffix=f" (Sample #{i+1})", cut_npe=cut_npe, cut_firsttime=cut_firsttime)
+                plot_histogram(sample_np, hist_output_path, title_suffix=f" (Sample #{i+1})", cut_npe=cut_npe, cut_firsttime=cut_firsttime, log_scale=histogram_log)
+            if histogram_combined and sig_actual_np is not None:
+                combined_path = output_dir / f"sampled_event_{ref_idx}_sample_{i+1:03d}_histogram_combined.png"
+                plot_histogram_combined(
+                    sig_actual_np,
+                    sample_np,
+                    combined_path,
+                    title_suffix=f" (Sample #{i+1})",
+                    cut_npe=cut_npe,
+                    cut_firsttime=cut_firsttime,
+                    log_scale=histogram_log,
+                )
+            if histogram_noclip:
+                sample_raw_np = x_np_raw[i]
+                noclip_path = output_dir / f"sampled_event_{ref_idx}_sample_{i+1:03d}_histogram_noclip.png"
+                plot_histogram_noclip(sample_raw_np, noclip_path, title_suffix=f" (Sample #{i+1})", log_scale=histogram_log)
         saved_samples.append(sample_np)
 
     return saved_samples[0] if len(saved_samples) == 1 else saved_samples
@@ -357,6 +506,9 @@ def main():
     parser.add_argument("--label", type=str, default=None, help="Custom label: Energy,ux,uy,X,Y,Z")
     parser.add_argument("--gpu", type=int, default=None, help="GPU ID")
     parser.add_argument("--histogram", action="store_true", help="Save histograms")
+    parser.add_argument("--histogram_combined", action="store_true", help="Save combined histogram (actual + sampled overlaid)")
+    parser.add_argument("--histogram_noclip", action="store_true", help="Save histogram of model output before denorm and clip (normalized)")
+    parser.add_argument("--histogram_log", action="store_true", help="Use log scale for histogram y-axis")
     parser.add_argument("--cut_npe", type=float, default=0.0, help="nPE cut (hide <= value)")
     parser.add_argument("--cut_firsttime", type=float, default=0.0, help="FirstTime cut (hide <= value)")
     parser.add_argument("--cfg_scale", type=float, default=None, help="Override CFG scale from checkpoint (default: use checkpoint)")
@@ -417,10 +569,12 @@ def main():
             null_label_raw = torch.zeros(1, 6, device=device)
             _, null_label_norm = prepare_batch(dummy_sig, null_label_raw, verbose=False)
 
+    sig_actual_np = None
     if not args.label:
         print(f"\nPlotting actual data from index {ref_idx}...")
         sig_ref_clamp = _clamp_sig(sig_ref_raw.unsqueeze(0).to(device))
         sig_ref_denorm = sig_ref_clamp[0].detach().cpu().numpy()
+        sig_actual_np = sig_ref_denorm
         # 오리지널(actual)에는 cut 없음 (0, 0). cut은 샘플에만 적용.
         sig_actual_vis = _apply_cuts(sig_ref_denorm, 0.0, 0.0)
         actual_output_path = output_dir / f"actual_event_{ref_idx}.png"
@@ -442,7 +596,7 @@ def main():
         print(f"Actual data saved to: {actual_output_path}")
         if args.histogram:
             actual_hist_path = output_dir / f"actual_event_{ref_idx}_histogram.png"
-            plot_histogram(sig_ref_denorm, actual_hist_path, title_suffix=" (Actual)", cut_npe=0.0, cut_firsttime=0.0)
+            plot_histogram(sig_ref_denorm, actual_hist_path, title_suffix=" (Actual)", cut_npe=0.0, cut_firsttime=0.0, log_scale=args.histogram_log)
 
     sample(
         model=model,
@@ -464,6 +618,10 @@ def main():
         use_cfg=use_cfg,
         cfg_scale=cfg_scale,
         null_label_norm=null_label_norm,
+        sig_actual_np=sig_actual_np,
+        histogram_combined=args.histogram_combined,
+        histogram_noclip=args.histogram_noclip,
+        histogram_log=args.histogram_log,
     )
     print("Done!")
 
