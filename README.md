@@ -10,12 +10,12 @@
 
 ## 🎯 Overview
 
-GENESIS is a **generative model** for synthesizing IceCube PMT signals from neutrino events. It uses a **Diffusion Transformer (DiT)** architecture to learn the complex patterns of photomultiplier tube (PMT) responses conditioned on neutrino event properties.
+JANUS is a **generative model** for synthesizing IceCube detector signals initiated by astophysical neutrino. It uses a **Diffusion Transformer (DiT)** architecture as a backbone to learn the complex patterns of detector responses conditioned on neutrino event properties.
 
 ### Key Features
 
-- 🚀 **State-of-the-art DiT architecture** for high-quality signal generation
-- 📊 **Efficient normalization** in dataloader (not model) for faster training
+- 🚀 **DiT architecture** for high-quality signal generation
+- 📊 **Normalization** in dataloader (not model) for faster training
 - 🎨 **3D visualization** of generated events
 - ⚡ **GPU-optimized** training with automatic batch size selection
 - 🔧 **Flexible configuration** via YAML files
