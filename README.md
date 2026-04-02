@@ -1,6 +1,6 @@
 # JANUS
 
-**Joint Generative Engine for Neutrino Event Simulation and Infernce System**
+**Joint generative Ai for icecube Neutrino reconstrUction and Simulation**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
