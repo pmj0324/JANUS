@@ -63,7 +63,7 @@ cfg_dropout = 0.1
 cfg_scale = 2.0
 
 # Flow Matching sampling
-sampling_method = "euler"  # "euler" or "rk4"
+sampling_method = "euler"  # "euler", "heun", "rk4", or "dopri5"
 sampling_steps = 50  # Number of ODE steps for sampling
 
 # Data normalization
@@ -234,6 +234,17 @@ def _clamp_sig(sig: torch.Tensor) -> torch.Tensor:
 def get_null_label(batch_size: int, label_dim: int, device: torch.device) -> torch.Tensor:
     """Create null label for CFG."""
     return torch.zeros(batch_size, label_dim, device=device)
+
+
+def _sample_flow_matching(flow_matching, method, model, x1, steps, label, device):
+    method = method.lower()
+    sampler_name = f"sample_ode_{method}"
+    sampler = getattr(flow_matching, sampler_name, None)
+    if sampler is None:
+        raise ValueError(
+            f"Unsupported sampling_method='{method}'. Choose from: euler, heun, rk4, dopri5"
+        )
+    return sampler(model, x1, steps, label, device)
 
 
 # ============================================================================
@@ -546,7 +557,7 @@ def main():
     
     print("params:", sum(p.numel() for p in model.parameters())/1e6, "M")
     print(f"CFG enabled: {use_cfg} (dropout={cfg_dropout}, scale={cfg_scale})")
-    print(f"Sampling method: {sampling_method}, steps: {sampling_steps}")
+    print(f"Sampling method: {sampling_method}, steps: {sampling_steps} (euler/heun/rk4/dopri5)")
     
     # Initialize Rectified Flow
     flow_matching = RectifiedFlow()
@@ -782,25 +793,12 @@ def main():
         
         # CFG for sampling
         if use_cfg:
-            # Unconditional
-            if sampling_method == "euler":
-                x_uncond = flow_matching.sample_ode_euler(model, x1, sampling_steps, None, device)
-            else:
-                x_uncond = flow_matching.sample_ode_rk4(model, x1, sampling_steps, None, device)
-            
-            # Conditional
-            if sampling_method == "euler":
-                x_cond = flow_matching.sample_ode_euler(model, x1, sampling_steps, label_ref_norm, device)
-            else:
-                x_cond = flow_matching.sample_ode_rk4(model, x1, sampling_steps, label_ref_norm, device)
-            
+            x_uncond = _sample_flow_matching(flow_matching, sampling_method, model, x1, sampling_steps, None, device)
+            x_cond = _sample_flow_matching(flow_matching, sampling_method, model, x1, sampling_steps, label_ref_norm, device)
             # CFG combination
             x = x_uncond + cfg_scale * (x_cond - x_uncond)
         else:
-            if sampling_method == "euler":
-                x = flow_matching.sample_ode_euler(model, x1, sampling_steps, label_ref_norm, device)
-            else:
-                x = flow_matching.sample_ode_rk4(model, x1, sampling_steps, label_ref_norm, device)
+            x = _sample_flow_matching(flow_matching, sampling_method, model, x1, sampling_steps, label_ref_norm, device)
         
         samples_denorm = denormalize_sig(x)
         sample_np = samples_denorm[0].detach().cpu().numpy()

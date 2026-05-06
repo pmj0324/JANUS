@@ -302,11 +302,36 @@ def _add_colorbar(fig: plt.Figure, norm: Normalize, cmap):
 
 
 def _style_axes(ax: plt.Axes):
-    """Style the 3D axes."""
-    ax.set_xlabel('X (m)')
-    ax.set_ylabel('Y (m)')
-    ax.set_zlabel('Z (m)')
-    ax.grid(True, alpha=0.3)
+    """Style 3D axes for transparent export (PPT-friendly)."""
+    # Hide axis label text only (ticks/scale remain visible).
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    ax.set_zlabel('')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_zticks([])
+    ax.tick_params(axis="both", which="both", length=0, labelsize=0)
+
+    # Remove 3D grid lines.
+    ax.grid(False)
+
+    # Make pane backgrounds transparent.
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        try:
+            axis.pane.fill = False
+            axis.pane.set_alpha(0.0)
+            axis.pane.set_facecolor((1.0, 1.0, 1.0, 0.0))
+            axis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.0))
+            axis.line.set_color((1.0, 1.0, 1.0, 0.0))
+        except Exception:
+            pass
+
+    # Keep axes background transparent.
+    ax.set_facecolor((1.0, 1.0, 1.0, 0.0))
+    try:
+        ax.figure.patch.set_alpha(0.0)
+    except Exception:
+        pass
 
 
 def show_event_dual_plot(
@@ -352,6 +377,7 @@ def show_event_dual_plot(
     npe_title = kwargs.pop("npe_title", "NPE")
     firsttime_cbar_label = kwargs.pop("firsttime_cbar_label", "FirstTime (ns)")
     npe_cbar_label = kwargs.pop("npe_cbar_label", "NPE")
+    scatter_background = kwargs.pop("scatter_background", True)
     # Optional fixed color range (None = use data min/max)
     firsttime_vmin = kwargs.pop("firsttime_vmin", None)
     firsttime_vmax = kwargs.pop("firsttime_vmax", None)
@@ -424,9 +450,10 @@ def show_event_dual_plot(
         _draw_detector_hull(ax1, x, y, z)
         _draw_detector_hull(ax2, x, y, z)
     
-    # Background dots (all PMTs)
-    ax1.scatter(x, y, z, s=1, c="gray", alpha=0.3)
-    ax2.scatter(x, y, z, s=1, c="gray", alpha=0.3)
+    # Optional background dots (all PMTs)
+    if scatter_background:
+        ax1.scatter(x, y, z, s=1, c="gray", alpha=0.3)
+        ax2.scatter(x, y, z, s=1, c="gray", alpha=0.3)
     
     # Left plot: firstTime
     nonzero_ftime_mask = (ftime != 0) & np.isfinite(ftime)

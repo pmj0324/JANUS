@@ -1,0 +1,59 @@
+# train_exp_rectified_flow.py: YAML config for Rectified Flow training
+# Usage: python train_exp_rectified_flow.py -c configs/train_exp_rectified_flow.yaml
+
+seed: 42
+
+# Classifier-Free Guidance (CFG)
+cfg:
+  use_cfg: true
+  cfg_scale: 2.0
+  cfg_dropout: 0.1
+
+# Validation
+val_ratio: 0.1
+val_every: 1
+
+# Learning rate scheduler (ReduceLROnPlateau)
+lr_scheduler:
+  patience: 5
+  factor: 0.5
+  min_lr: 1e-6
+
+# Early stopping
+early_stopping:
+  patience: 10
+  min_delta: 1e-6
+
+# Flow sampling
+sampling:
+  method: euler  # options: euler, heun, rk4, dopri5
+  steps: 50
+
+# Training
+training:
+  nepochs: 20
+  lr: 0.0003
+  bsz: 256
+
+# Model (DiT)
+model:
+  type: dit
+  options:
+    d_model: 256
+    nhead: 8
+    depth: 6
+    mlp_ratio: 4.0
+    dropout: 0.0
+    label_dim: 6
+
+# Data
+data:
+  h5_path: ./GENESIS-data/22644_0921_time_shift.h5
+  num_workers: 32
+
+# Paths and other settings
+path: ./output/
+save_plots: true
+device: cuda
+print_every: 50
+compile_model: false
